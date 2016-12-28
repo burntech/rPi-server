@@ -1,6 +1,6 @@
 /*
 
-THIS IS NOW DEPRECATED IN FAVOR OF but-client.ino (the arduino-like
+THIS MAY NOW DEPRECATED IN FAVOR OF but-client.ino (the arduino-like
 version of the code for the ESP8266).
 
 NEED NON-BLOCKING DEBOUNCE - only accept a single button push within (say) 100 ms (for a given button)

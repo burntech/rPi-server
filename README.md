@@ -1,4 +1,7 @@
 # rPi-server
+
+from Capn Nemo
+
 The Carnival socket server that works in conjunction with the ESP clients.
 
 Generally, this directory would be located in the /home/pi/code/ directory.  You need to compile of couurse, typically 

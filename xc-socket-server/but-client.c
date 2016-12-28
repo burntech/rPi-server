@@ -1,10 +1,11 @@
 /*
 
-THIS MAY NOW DEPRECATED IN FAVOR OF but-client.ino (the arduino-like
+THIS MAY NOW BE DEPRECATED IN FAVOR OF but-client.ino (the arduino-like
 version of the code for the ESP8266).
 
 NEED NON-BLOCKING DEBOUNCE - only accept a single button push within (say) 100 ms (for a given button)
 
+CURRENTLY requires the wiringPi library, both for delay(), and for the pin assignments.
 
    but-client.c	V3.0
    Copyrights - Neil Verplank 2016 (c)

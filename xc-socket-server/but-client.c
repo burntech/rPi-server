@@ -1,11 +1,10 @@
 /*
 
-THIS MAY NOW BE DEPRECATED IN FAVOR OF but-client.ino (the arduino-like
+THIS IS NOW DEPRECATED IN FAVOR OF but-client.ino (the arduino-like
 version of the code for the ESP8266).
 
 NEED NON-BLOCKING DEBOUNCE - only accept a single button push within (say) 100 ms (for a given button)
 
-CURRENTLY requires the wiringPi library, both for delay(), and for the pin assignments.
 
    but-client.c	V3.0
    Copyrights - Neil Verplank 2016 (c)
@@ -88,7 +87,7 @@ int	DEBUG = 0;	        /* 0=daemon, 1=command line	*/
 
 
 //#define numbtns   12
-#define numbtns   1
+#define numbtns   2
 
 // make an array of actual buttons we need to go through....
 
@@ -106,7 +105,7 @@ int	DEBUG = 0;	        /* 0=daemon, 1=command line	*/
 #define butPin12  21  
 
 //int buttons[numbtns] = {butPin1,butPin2,butPin3,butPin4,butPin5,butPin6,butPin7,butPin8,butPin9,butPin10,butPin11,butPin12};
-int buttons[numbtns] = {butPin1};
+int buttons[numbtns] = {butPin1,butPin2};
 
 
 const char* MSG = "B";

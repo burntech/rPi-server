@@ -103,23 +103,24 @@ int	DEBUG           =0;     // 0=daemon, no output, 1=command line with output
 
 #define BUTTON		"B"		// 0
 #define ENTRY   	"ENTRY"		// 1
-#define SKEEBALL	"SKEEBALL"	// 2
-#define LOKI      	"LOKI"		// 3
-#define DRAGON		"DRAGON"	// 4
-#define ORGAN		"ORGAN"		// 5
-#define POPCORN		"POPCORN"	// 6
-#define STRIKER		"STRIKER"	// 7
-#define SIDESHOW	"SIDESHOW"	// 8
-#define TICTAC		"TICTAC"	// 9
-#define CAMERA 		"CAMERA"	// 10
-#define FPBUTTON        "FPBUTTON"      // 11
-#define FLASH1		"FLASH1" 	// 12
-#define FLASH2		"FLASH2" 	// 13
-#define SHAKE		"SHAKE"		// 14
-#define NEO 		"NEO"           // 15
-#define AERIAL 		"AERIAL"        // 16
-#define BIGBETTY        "BIGBETTY"      // 17
-#define LULU		"LULU"		// 18
+#define SKEEBALL	"SMOKESTACK"	// 2
+#define SKEEBALL	"SKEEBALL"	// 3
+#define LOKI      	"LOKI"		// 4
+#define DRAGON		"DRAGON"	// 5
+#define ORGAN		"ORGAN"		// 6
+#define POPCORN		"POPCORN"	// 7
+#define STRIKER		"STRIKER"	// 8
+#define SIDESHOW	"SIDESHOW"	// 9
+#define TICTAC		"TICTAC"	// 10
+#define CAMERA 		"CAMERA"	// 11
+#define FPBUTTON        "FPBUTTON"      // 12
+#define FLASH1		"FLASH1" 	// 13
+#define FLASH2		"FLASH2" 	// 14
+#define SHAKE		"SHAKE"		// 15
+#define NEO 		"NEO"           // 16
+#define AERIAL 		"AERIAL"        // 17
+#define BIGBETTY        "BIGBETTY"      // 18
+#define LULU		"LULU"		// 19
 
 
 #define PoofON 		"$p1%"
@@ -131,6 +132,7 @@ enum POOFER
 {
   button,
   entry,
+  smokestack,
   skeeball,
   loki,
   dragon,
@@ -159,6 +161,7 @@ correspond with the enumeration above (same order, same number)
 const char* game[maxclients] = {
 BUTTON,
 ENTRY,
+SMOKESTACK,
 SKEEBALL,
 LOKI,
 DRAGON,

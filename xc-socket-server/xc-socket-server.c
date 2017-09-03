@@ -103,7 +103,7 @@ int	DEBUG           =0;     // 0=daemon, no output, 1=command line with output
 
 #define BUTTON		"B"		// 0
 #define ENTRY   	"ENTRY"		// 1
-#define SKEEBALL	"SMOKESTACK"	// 2
+#define SMOKESTACK      "SMOKESTACK"	// 2
 #define SKEEBALL	"SKEEBALL"	// 3
 #define LOKI      	"LOKI"		// 4
 #define DRAGON		"DRAGON"	// 5

@@ -1,6 +1,6 @@
 /*
 
-THIS IS NOW DEPRECATED IN FAVOR OF but-client.ino (the arduino-like
+THIS IS might be DEPRECATED IN FAVOR OF but-client.ino (the arduino-like
 version of the code for the ESP8266).
 
 NEED NON-BLOCKING DEBOUNCE - only accept a single button push within (say) 100 ms (for a given button)
@@ -77,7 +77,7 @@ int	DEBUG = 0;	        /* 0=daemon, 1=command line	*/
 #define PORT      5061    	/* port of our xc-socket-server */
 #define ON        LOW
 #define OFF       HIGH 
-#define stdDelay  2             /* loop round trip (ms)		*/
+#define stdDelay  1             /* loop round trip (ms)		*/
 #define butDelay  2000    	/* delay after round,etc (ms)	*/
 #define msgSize   16 
 
@@ -112,6 +112,8 @@ const char* MSG = "B";
 const char* DIV = ":";
 const char* NL  = '\0';
 
+char* RELEASE = "B:1:0";
+char* PUSH    = "B:1:1";
 
 
 /* Set up raspberry pi for buttons */
@@ -133,7 +135,7 @@ void send_msg (int sock, char *msg) {
 
     int nBytes = strlen(msg) + 1;
     send(sock, msg, nBytes, MSG_NOSIGNAL);
-    if (DEBUG) { printf("message:%s, i:%d\n",msg,sock); fflush(stdout); }
+    if (DEBUG) { printf("message:%s, i:%d, size:%d\n",msg,sock,sizeof(msg)); fflush(stdout); }
 }
 
 
@@ -203,10 +205,10 @@ int main(int argc,char **argv) {
     setupPi();
 
     /* announce ourself as the button client ('B:')	*/
-    memset(message,'\0',msgSize);
+/*    memset(message,'\0',msgSize);
     strcpy(message, MSG);
-    strcat(message, DIV);
-    send_msg(sockfd,message);
+    strcat(message, DIV);*/
+    send_msg(sockfd,RELEASE);
 
     /* zero out our buttons	*/
     for (i=0; i<numbtns; i++) { butspushed[i]=0; }
@@ -224,7 +226,7 @@ int main(int argc,char **argv) {
 
             pushed = i+1; 
 	    /* "B:dd:d:" ('B'utton:2 digit identifier:1 or 0) */
-            message[0]='\0';
+            memset(message,'\0',msgSize);
 
 	    if (digitalRead(buttons[i])==ON) {
                 if (!butspushed[i]) {
@@ -234,7 +236,7 @@ int main(int argc,char **argv) {
 	            // button 1 is "active" for as long as you push it.
 	     	    // buttons 2 and 3 send a signal, wait 2 seconds.
                     if (i==2 || i==3) { thedelay=butDelay; }
-
+/*
 		    strcpy(message, MSG);
 		    strcat(message, DIV);
 		    char tmp[10];
@@ -242,16 +244,15 @@ int main(int argc,char **argv) {
 		    strcat(message, tmp);
 		    strcat(message, DIV);
 		    strcat(message, ONE);
-	    	    strcat(message, DIV);
-                    if (DEBUG) { printf(message);printf(" size:%d\n",sizeof(message));fflush(stdout); }
-                    send_msg(sockfd,message);
+	    	    strcat(message, DIV);*/
+                    send_msg(sockfd,PUSH);
                 }
             } else {
                 if (butspushed[i]) { 
 
                     /* button is off, but was on before */
                     butspushed[i]=0;
-
+/*
 		    strcpy(message, MSG);
 		    strcat(message, DIV);
 		    char tmp[10];
@@ -259,9 +260,8 @@ int main(int argc,char **argv) {
 		    strcat(message, tmp);
 		    strcat(message, DIV);
 		    strcat(message, ZERO);
-	    	    strcat(message, DIV);
-                    if (DEBUG) { printf(message);printf(" size:%d\n",sizeof(message));fflush(stdout); }
-                    send_msg(sockfd,message);
+	    	    strcat(message, DIV); */
+                    send_msg(sockfd,RELEASE);
                 }
             }
         }

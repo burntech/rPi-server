@@ -33,7 +33,9 @@
    always turning off Nalge's algorithm (something Mosquitto doesn't
    currently do), which as of Oct '17 is allowing for <2ms latency on
    all transmissions (below human perceptibility).  It can yet be
-   better, but pretty good so far.
+   better, but pretty good so far - about 100 microseconds for message in
+   to first message out.  Bottom line, the server is not currently
+   causing any messaging delays (it's in the huzzah code).
 
    In addition, the clients are presumed to be sending a keep alive
    signal, and the server presumes to keep the sockets open to minimize
@@ -106,8 +108,8 @@ int	DEBUG           = 0;    // 0=daemon, no output, 1=command line with output
 #define	PORT		5061	// port for our carnival server   	
 #define	BUFLEN		1024	// buffer length 	   	
 #define maxclients      40      // max number of newtwork clients, somewhat arbitrary	
-#define ROpoofLength	30 	// milliseconds of a poof in roundOrder 
-#define ROpoofDelay	30 	// milliseconds delay between poofs roundOrder 	
+#define ROpoofLength	100 	// milliseconds of a poof in roundOrder 
+#define ROpoofDelay	40 	// milliseconds delay between poofs roundOrder 	
 
 
 // PRE-DEFINED OUTGOING MESSAGES
@@ -188,11 +190,12 @@ typedef struct _msg_t_ {
 
 
 
-int     max_socket    = 0;              // will hold the largest possible next socket number
-int     rc            = 0;              // socket to which we bind
-int     firstSocket   = 0;              // socket to which we listen
-long    start_time    = 0L;             // sys clock when we begin
-long    current_time  = 0L;             // millisenconds since start_time
+int     max_socket     = 0;             // will hold the largest possible next socket number
+int     firstSocket    = 0;             // socket to which we listen
+float   start_time     = 0;             // sys clock when we begin
+float   current_time   = 0;             // millisenconds since start_time
+int     current_micros = 0;             // microsend component as int
+int     start_micros   = 0;             // microsend component as int
 
 
 
@@ -296,6 +299,7 @@ void    free_node();
 int main(int argc,char **argv) {
 
     // socket server variables 
+    int            rc;
     int		   i;				// index counters for loop operations
     fd_set	   open_sockets;   		// set of open sockets
     fd_set	   readable_sockets; 		// set of sockets available to be read
@@ -307,15 +311,12 @@ int main(int argc,char **argv) {
     int             size_of_table 
                      = (int)maxclients/2;       // theorectically, a max of 2 per bucket, ideal.
 
-
     // Make this server a DAEMON if not debugging
     forkify(argc, argv);
-
 
     // set initial time, clear socket sets
     millis(); 
     FD_ZERO(&open_sockets);	
-    FD_ZERO(&readable_sockets);
 
     // Create basic hash table to use as associative array for named sockets
     my_hash_table = create_hash_table(size_of_table);
@@ -335,10 +336,17 @@ int main(int argc,char **argv) {
         // return from select - add incoming sockets to pool 
         acceptSK(firstSocket, readable_sockets, &open_sockets);
 
-	for (i=firstSocket+1; i<max_socket+1; i++)  {
+        // seemingly no way to determine *which* socket is readable -
+        // we go through all of them until we've processed on as
+        // many sockets as select() told us were available.
+	for (i=firstSocket+1; i<max_socket+1 && rc; i++)  {
 
             // read incoming, set named effect, get socket number
-            my_msg = readMsg(i, &readable_sockets, &open_sockets, my_hash_table);
+            if (FD_ISSET(i, &readable_sockets)) {
+                my_msg = readMsg(i, &readable_sockets, &open_sockets, my_hash_table);
+                rc--;  // found a socket, decrement the count
+            } else
+                continue;
 
             // skip non-messages, blank messages, messages from un-named effects
             if (!my_msg || !my_msg->whosTalking || !my_msg->firstMsg)   
@@ -346,9 +354,9 @@ int main(int argc,char **argv) {
 
             // show message if debugging
             if (DEBUG) {
-              printf("->  %s on socket#:%02d firstMsg:'%s' secondMsg:'%s'   ",
+                cur_time();
+                printf("->  %s on socket#:%02d firstMsg:'%s' secondMsg:'%s'\n",
 		my_msg->effectName,i,my_msg->firstMsg,my_msg->secondMsg);
-		cur_time();
 		fflush(stdout); }
 
             // no need to process keep alive signals
@@ -359,6 +367,10 @@ int main(int argc,char **argv) {
             processMsg(my_msg, &open_sockets, my_hash_table);
 
             free_msg(my_msg);
+
+            // only read from as many sockets as select says have a message
+            rc--;
+            if (rc == 0) i=max_socket+1;
         } 
     } 
 
@@ -470,7 +482,7 @@ void getFirstSock(fd_set *open_sockets) {
     }
 
     // bind the socket to the newly formed address 
-    rc = bind(firstSocket, (struct sockaddr *)&sa, sizeof(sa));
+    int rc = bind(firstSocket, (struct sockaddr *)&sa, sizeof(sa));
 
     /* check there was no error */
     if (rc) {
@@ -538,7 +550,7 @@ int acceptSK(int s, fd_set readable_sockets, fd_set *open_sockets) {
 
         FD_SET(cs, open_sockets);			        /* add socket to set of open sockets */
         if (cs > max_socket) { max_socket = cs; }  	/* reset max */
-        if (DEBUG) { printf("->->new socket#:%02d\n", cs);fflush(stdout); }
+        if (DEBUG) { cur_time(); printf("->->new socket#:%02d\n", cs);fflush(stdout); }
 	   
     }
 
@@ -645,26 +657,22 @@ msg_t *readMsg(int socket, fd_set *readable_sockets, fd_set *open_sockets, hash_
     int    received  = 0;
     char   buf[BUFLEN+1]; 
 
-    if (FD_ISSET(socket, readable_sockets)) { 
+    memset(buf,0,BUFLEN);	        // clear buffer 
+    int rc = read(socket, buf, BUFLEN);	// read from the socket 
 
-        memset(buf,0,BUFLEN);	        // clear buffer 
-	rc = read(socket, buf, BUFLEN);	// read from the socket 
-	if (rc < 1) {
-            if (DEBUG) { printf("x\tclosing socket:%d, can't read\n",socket);fflush(stdout); }
-            closeSK(socket, open_sockets, hashtable);
-	} else if (buf[0] < 32) {
-            // skip escape characters 
-            return NULL;
-	} else {
+    if (rc < 1) {
+        if (DEBUG) { cur_time(); printf("x\tclosing socket:%d, can't read\n",socket);fflush(stdout); }
+        closeSK(socket, open_sockets, hashtable);
+    } else if (buf[0] < 32) {
+        // skip escaped characters 
+        return NULL;
+    } else {
+        received = socket;
+        my_msg   = new_msg(buf, received);
 
-            received = socket;
-
-            my_msg = new_msg(buf, received);
-
-            // get name of effect, associate socket with that effect as needed
-            if (!namedSock(my_msg, open_sockets, readable_sockets, hashtable)) 
-               return NULL;
-	}
+        // get name of effect, associate socket with that effect as needed
+        if (!namedSock(my_msg, open_sockets, readable_sockets, hashtable)) 
+           return NULL;
     }
 
     return my_msg;
@@ -727,7 +735,7 @@ int namedSock (msg_t *my_msg, fd_set *open_sockets, fd_set *readable_sockets, ha
             // it's not the same as incomming
             if (FD_ISSET(aSock, readable_sockets)) { 
                 // yet the old one appears readable - duplicate?
-                if (DEBUG) { printf("->DUPLICATE for %s!  old socket:%d (still seems readable), new socket:%d. IGNORING THIS EFFECT.\n", 
+                if (DEBUG) { cur_time(); printf("->DUPLICATE for %s!  old socket:%d (still seems readable), new socket:%d. IGNORING THIS EFFECT.\n", 
                     my_msg->effectName, aSock, my_msg->whosTalking); fflush(stdout); }
 
                 // So, our default behaviour is going to be ignore messages from duplicates.
@@ -740,7 +748,7 @@ int namedSock (msg_t *my_msg, fd_set *open_sockets, fd_set *readable_sockets, ha
                 // old socket has closed - effect went away and came back
                 forceCloseSK(aSock, open_sockets);
                 set_effect_socket(hashtable, my_msg->effectName, my_msg->whosTalking);
-                if (DEBUG) { printf("x   FORCE close old socket on name:%s socket:%d, new socket:%d\n", 
+                if (DEBUG) {cur_time();  printf("x   FORCE close old socket on name:%s socket:%d, new socket:%d\n", 
                    my_msg->effectName, aSock, my_msg->whosTalking);fflush(stdout); }
             }
         } // else we're fine - just another message from a known socket, or a re-connect
@@ -769,13 +777,13 @@ void send_msg (list_t *my_element, fd_set *open_sockets, char *msg, hash_table_t
         int nBytes = strlen(msg) + 1;
         if (!my_element->do_not_send) {
             send(sock, msg, nBytes, MSG_NOSIGNAL);
-            if (DEBUG) { printf("<-  sent message:'%s' to %10s on socket:%02d   ",msg,effect,sock);cur_time(); fflush(stdout); }
+            if (DEBUG) { cur_time(); printf("<-  sent message:'%s' to %10s on socket:%02d\n",msg,effect,sock); fflush(stdout); }
         } else {
-            if (DEBUG) { printf("xx  skipped message:'%s' to %10s on socket:%02d (dns set) ",msg,effect,sock);cur_time(); fflush(stdout); }
+            if (DEBUG) { cur_time(); printf("xx  skipped message:'%s' to %10s on socket:%02d (dns set)\n",msg,effect,sock); fflush(stdout); }
         }
     } else { // close any unavailable socket
         closeSK(sock, open_sockets, hashtable);
-        if (DEBUG) { printf("x   closing socket:%d, can't write\n",sock);fflush(stdout); }
+        if (DEBUG) { cur_time(); printf("x   closing socket:%d, can't write\n",sock);fflush(stdout); }
     }
 }
 
@@ -819,9 +827,9 @@ void doButton(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
     int	which_but = 0; 		// number of button currently pushed/released
     int butstate  = 0;		// 1 if pressed, 0 if released
 
-    if (my_msg->firstMsg) {
+    if (my_msg->firstMsg != NULL) {
         which_but = naive_str2int(my_msg->firstMsg);
-        if (my_msg->secondMsg) {
+        if (my_msg->secondMsg != NULL) {
             butstate = naive_str2int(my_msg->secondMsg);
         }
     }
@@ -845,12 +853,12 @@ void doButton(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
 
 
 
-// NOTE THAT ALL THESE ARE BLOCKING ROUTINES!!!! PROBABLY NEED TO FIX THAT 
+// NOTE THAT ALL THESE ARE BLOCKING ROUTINES!!!! NEED TO FIX THAT 
 
 /*  Go around in a "circle" several times, faster, then big finish */
 void bigRound(int whosTalking, fd_set *open_sockets, hash_table_t *hashtable) {
 
-    if (DEBUG) { printf("\tLet's Have a big ROUND!!   "); cur_time(); fflush(stdout); }
+    if (DEBUG) { cur_time(); printf("\tLet's Have a big ROUND!!\n");  fflush(stdout); }
 
     list_t *all_elements =  get_ordered_list(hashtable);
     int poof_time = ROpoofLength;
@@ -883,7 +891,7 @@ void roundRobbin(int whosTalking, hash_table_t *hashtable, list_t *all_elements,
     while (all_elements!= NULL) {
         mySock = all_elements->socket_num;
 
-        if (mySock && mySock != whosTalking) {
+        if (mySock != whosTalking) {
             send_msg(all_elements, open_sockets, PoofON, hashtable);
             delay(the_poof);
             send_msg(all_elements, open_sockets, PoofOFF, hashtable);
@@ -951,7 +959,7 @@ void error(char *msg) {
 /* set and keep the current time since process start, in millisenconds */
 long millis(void) {
 
-    long            ms; // Milliseconds
+    float           ms; // Milliseconds
     time_t          s;  // Seconds
     struct timespec spec;
 
@@ -959,16 +967,18 @@ long millis(void) {
 
     s  = spec.tv_sec;
     ms = spec.tv_nsec / 1.0e6; // Convert nanoseconds to milliseconds
+  
+    current_micros = (ms-(int)ms)*1000;
 
     /*printf("Current time: %"PRIdMAX".%03ld seconds since the Epoch.  ms:%ld\n",
            (intmax_t)s, ms, ms);*/
-
     if (!start_time) {
-        start_time = ms + s*1000;
+        start_time   = ms + s*1000;
+        start_micros = current_micros;
         return 0L;
     } 
 
-    current_time = ms + s*1000 - start_time;
+    current_time = ms + s*1000 + current_micros/1000 - start_time;
        
     return current_time;
 }
@@ -978,14 +988,14 @@ long millis(void) {
 
 /* prints the time , mostly for debugging*/
 void cur_time (void) {
-    millis();
 
+    millis();
     int h  = current_time/(3600000);
     int m  = (current_time - h*3600000)/60000;
     int s  = (current_time - h*3600000 - m*60000)/1000;
     int ms = (current_time - h*3600000 - m*60000 - s*1000);
-
-    if (DEBUG) printf("time:  %02d:%02d:%02d.%03d\n", h,m,s,ms);
+    
+    printf("%02d:%02d:%02d.%03d%03d  ", h,m,s,ms,current_micros);
 }
 
 
@@ -993,6 +1003,7 @@ void cur_time (void) {
 
 /* delays some number of milliseconds  */
 void delay (unsigned int howLong) {
+
   struct timespec sleeper, dummy ;
 
   sleeper.tv_sec  = (time_t)(howLong / 1000) ;
@@ -1048,11 +1059,10 @@ int naive_str2int (const char* snum) {
 void msg_list(int whosTalking, list_t *all_effects, fd_set *open_sockets, hash_table_t *hashtable, char *msg) {
 
     while (all_effects != NULL) {
-        int   mySock   = all_effects->socket_num;
 
-        if (mySock && mySock != whosTalking) {
+        if (all_effects->socket_num != whosTalking) 
             send_msg(all_effects, open_sockets, msg, hashtable);
-        }
+        
         all_effects = all_effects->next;
     }
 }

@@ -364,7 +364,7 @@ int main(int argc,char **argv) {
                 continue; 
 
             // do something with a meaningful message
-            processMsg(my_msg, &open_sockets, my_hash_table);
+            processMsg(my_msg, &open_sockets, &writeable_sockets, my_hash_table);
 
             free_msg(my_msg);
 
@@ -682,7 +682,7 @@ msg_t *readMsg(int socket, fd_set *readable_sockets, fd_set *open_sockets, hash_
 
 
 /* given an incoming message, do the right thing with that message */
-void processMsg(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
+void processMsg(msg_t *my_msg, fd_set *open_sockets, fd_set *writeable_sockets, hash_table_t *hashtable) {
 
     if (strcmp(my_msg->firstMsg,CONTROL)==0) {
 
@@ -1185,6 +1185,8 @@ list_t *concat_lists(list_t *first_list, list_t *second_list) {
 void set_list_order(hash_table_t *hashtable, msg_t *input) {
 
     list_t *ordered_list   = get_list(hashtable, input->thirdMsg); 
+    if (hashtable->ordered != NULL) 
+        free_node_list(hashtable->ordered);  // free up old list, if any
     hashtable->ordered     = ordered_list;
     hashtable->modified    = millis();
     hashtable->ordered_set = hashtable->modified;
@@ -1647,7 +1649,13 @@ list_t *get_all_nodes(hash_table_t *hashtable) {
 
 
 
-/*  FREE MEMORY ROUTINES  */
+/*  
+    FREE MEMORY ROUTINES  
+
+    We explicitly set the thing being freed to NULL
+    prior to freeing it.  Guarantees we can expect
+    the thing to be NULL, no dangling pointers.
+*/
 
 
 /*    frees all memory used by a message   */
@@ -1660,6 +1668,7 @@ void free_msg(msg_t *msg) {
     free(msg->secondMsg); 
     free(msg->thirdMsg); 
     free(msg->fourthMsg); 
+    msg = NULL;
     free(msg); 
 }
 
@@ -1686,6 +1695,7 @@ void free_table(hash_table_t *hashtable) {
     free(hashtable->table); 
     free_node_list(hashtable->all); 
     free_node_list(hashtable->ordered); 
+    hashtable = NULL;
     free(hashtable); 
 }
 
@@ -1694,12 +1704,14 @@ void free_table(hash_table_t *hashtable) {
 
 /*    frees all memory used by a linked list of nodes    */
 void free_node_list(list_t *list) {
-    list_t *temp;  
+    list_t *head, *temp;
+    head = list;  
     while(list!=NULL) { 
         temp = list; 
         list = list->next; 
         free_node(temp);
     } 
+    head = NULL;
 }
 
 
@@ -1707,6 +1719,7 @@ void free_node_list(list_t *list) {
 
 /*      frees all memory for a given node   */
 void free_node(list_t *node) {
-    free(node->effect); 
+    free(node->effect);
+    node = NULL; 
     free(node); 
 }

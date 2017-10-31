@@ -348,9 +348,9 @@ int main(int argc,char **argv) {
             } else
                 continue;
 
-            // skip non-messages, blank messages, messages from un-named effects
-            if (!my_msg || !my_msg->whosTalking || !my_msg->firstMsg)   
-                continue; 
+            // skip mal-formed messages (no message at all/no identifier, no socket?)
+            if (!my_msg || !my_msg->whosTalking)
+                continue;
 
             // show message if debugging
             if (DEBUG) {
@@ -359,12 +359,12 @@ int main(int argc,char **argv) {
 		my_msg->effectName,i,my_msg->firstMsg,my_msg->secondMsg);
 		fflush(stdout); }
 
-            // no need to process keep alive signals
-            if (my_msg->firstMsg && strcmp(my_msg->firstMsg,KeepAlive)==0)  
+            // no need to process empty messages or keep alive signals
+            if (my_msg->firstMsg == NULL || (my_msg->firstMsg && strcmp(my_msg->firstMsg,KeepAlive)==0))  
                 continue; 
 
             // do something with a meaningful message
-            processMsg(my_msg, &open_sockets, &writeable_sockets, my_hash_table);
+            processMsg(my_msg, &open_sockets, my_hash_table);
 
             free_msg(my_msg);
 
@@ -682,7 +682,7 @@ msg_t *readMsg(int socket, fd_set *readable_sockets, fd_set *open_sockets, hash_
 
 
 /* given an incoming message, do the right thing with that message */
-void processMsg(msg_t *my_msg, fd_set *open_sockets, fd_set *writeable_sockets, hash_table_t *hashtable) {
+void processMsg(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
 
     if (strcmp(my_msg->firstMsg,CONTROL)==0) {
 
@@ -1649,13 +1649,7 @@ list_t *get_all_nodes(hash_table_t *hashtable) {
 
 
 
-/*  
-    FREE MEMORY ROUTINES  
-
-    We explicitly set the thing being freed to NULL
-    prior to freeing it.  Guarantees we can expect
-    the thing to be NULL, no dangling pointers.
-*/
+/*      FREE MEMORY ROUTINES  */
 
 
 /*    frees all memory used by a message   */
@@ -1668,7 +1662,6 @@ void free_msg(msg_t *msg) {
     free(msg->secondMsg); 
     free(msg->thirdMsg); 
     free(msg->fourthMsg); 
-    msg = NULL;
     free(msg); 
 }
 
@@ -1695,7 +1688,6 @@ void free_table(hash_table_t *hashtable) {
     free(hashtable->table); 
     free_node_list(hashtable->all); 
     free_node_list(hashtable->ordered); 
-    hashtable = NULL;
     free(hashtable); 
 }
 
@@ -1703,12 +1695,12 @@ void free_table(hash_table_t *hashtable) {
 
 
 /*    frees all memory used by a linked list of nodes    */
-void free_node_list(list_t *list) {
-    list_t *head, *temp;
-    head = list;  
-    while(list!=NULL) { 
-        temp = list; 
-        list = list->next; 
+void free_node_list(list_t *head) {
+    list_t *pos, *temp;
+    pos = head;
+    while(pos!=NULL) { 
+        temp = pos; 
+        pos  = pos->next; 
         free_node(temp);
     } 
     head = NULL;
@@ -1720,6 +1712,5 @@ void free_node_list(list_t *list) {
 /*      frees all memory for a given node   */
 void free_node(list_t *node) {
     free(node->effect);
-    node = NULL; 
     free(node); 
 }

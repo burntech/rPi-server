@@ -303,13 +303,21 @@ int main(int argc,char **argv) {
     int		   i;				// index counters for loop operations
     fd_set	   open_sockets;   		// set of open sockets
     fd_set	   readable_sockets; 		// set of sockets available to be read
+    fd_set	   writeable_sockets; 		// set of sockets available for writing 
+    char           *ipadd;
 
     hash_table_t   *my_hash_table;		// hash for holding effect names, sockets, properties
 
     msg_t          *my_msg;	 		// struct for holding incoming message components
 
-    int             size_of_table 
+    int            size_of_table 
                      = (int)maxclients/2;       // theorectically, a max of 2 per bucket, ideal.
+
+// NOT right, sockeet numbers aren't 0..maxclients!!
+// also, plug unplug, still @#$@#$ seg-faulting.
+//    char          *ips[maxclients];
+
+//    for(i=0; i<maxclients; i++) ips[i] = NULL;  
 
     // Make this server a DAEMON if not debugging
     forkify(argc, argv);
@@ -328,13 +336,16 @@ int main(int argc,char **argv) {
     while (1) {
 
 	readable_sockets   = open_sockets;
+	writeable_sockets  = open_sockets;
 
 	// check which sockets are ready for reading.     
         // (null in timeout means wait until incoming data)
-        rc = select(max_socket+1, &readable_sockets, NULL, NULL, (struct timeval *)NULL);
+        rc = select(max_socket+1, &readable_sockets, &writeable_sockets, NULL, (struct timeval *)NULL);
 
         // return from select - add incoming sockets to pool 
-        acceptSK(firstSocket, readable_sockets, &open_sockets);
+        ipadd = "";
+        //int sk = acceptSK(firstSocket, readable_sockets, &open_sockets, &ipadd);
+        acceptSK(firstSocket, readable_sockets, &open_sockets, &ipadd);
 
         // seemingly no way to determine *which* socket is readable -
         // we go through all of them until we've processed on as
@@ -343,7 +354,7 @@ int main(int argc,char **argv) {
 
             // read incoming, set named effect, get socket number
             if (FD_ISSET(i, &readable_sockets)) {
-                my_msg = readMsg(i, &readable_sockets, &open_sockets, my_hash_table);
+                my_msg = readMsg(i, &readable_sockets, &open_sockets, &writeable_sockets, my_hash_table);
                 rc--;  // found a socket, decrement the count
             } else
                 continue;
@@ -510,15 +521,16 @@ void getFirstSock(fd_set *open_sockets) {
 
 
 /* Accept an incoming socket */
-int acceptSK(int s, fd_set readable_sockets, fd_set *open_sockets) {
+int acceptSK(int s, fd_set readable_sockets, fd_set *open_sockets, char **ipout ) {
 
     /* accept incoming connections, if any, add to array */
+ 
+    int  cs     = 0;
+    int  result = 0;
+    int  flag   = 1;	  	 	/* for TCP_NODELAY				*/
 
-    int cs     = 0;
-    int result = 0;
-    int flag   = 1;	  	 	/* for TCP_NODELAY				*/
-
-    struct sockaddr_in	csa; 		/* client's address struct 			*/
+    struct sockaddr_storage	csa; 	/* client's address struct 			*/
+    char ipstr[INET6_ADDRSTRLEN];
     socklen_t size_csa; 		/* size of client's address struct 		*/
     size_csa = sizeof(csa);		/* remember size for later usage */
 
@@ -548,10 +560,21 @@ int acceptSK(int s, fd_set readable_sockets, fd_set *open_sockets) {
             if (DEBUG) { printf("TCP_NODEAY failed.\n");fflush(stdout); }
         }
 
-        FD_SET(cs, open_sockets);			        /* add socket to set of open sockets */
+        FD_SET(cs, open_sockets);		        /* add socket to set of open sockets */
         if (cs > max_socket) { max_socket = cs; }  	/* reset max */
-        if (DEBUG) { cur_time(); printf("->->new socket#:%02d\n", cs);fflush(stdout); }
-	   
+	  
+
+        if (csa.ss_family == AF_INET) {
+            struct sockaddr_in *ss = (struct sockaddr_in *)&csa;
+            inet_ntop(AF_INET, &ss->sin_addr, ipstr, sizeof ipstr);
+        } else if (csa.ss_family == AF_INET6) {
+            struct sockaddr_in6 *ss = (struct sockaddr_in6 *)&csa;
+            inet_ntop(AF_INET6, &ss->sin6_addr, ipstr, sizeof ipstr);
+        } 
+
+        if (DEBUG) { cur_time(); printf("->->new socket#:%02d ipaddr:%s\n", cs, ipstr);fflush(stdout); }
+
+        *ipout = strdup(ipstr);
     }
 
     return cs;
@@ -585,7 +608,7 @@ msg_t *new_msg(char *str, int sock) {
     msg_t *newmsg; 
 
     // allocate memory for new node
-    if ((newmsg = malloc(sizeof(msg_t))) == NULL) return NULL;
+    if ((newmsg = (msg_t *)malloc(sizeof(msg_t))) == NULL) return NULL;
 
     char *part;
     
@@ -651,7 +674,7 @@ char *test_part(char *str) {
     whosTalking will equal the socket that sent the message.
   
 */
-msg_t *readMsg(int socket, fd_set *readable_sockets, fd_set *open_sockets, hash_table_t *hashtable) {
+msg_t *readMsg(int socket, fd_set *readable_sockets, fd_set *open_sockets, fd_set *writeable_sockets,  hash_table_t *hashtable) {
 
     msg_t *my_msg = NULL;
     int    received  = 0;
@@ -671,7 +694,7 @@ msg_t *readMsg(int socket, fd_set *readable_sockets, fd_set *open_sockets, hash_
         my_msg   = new_msg(buf, received);
 
         // get name of effect, associate socket with that effect as needed
-        if (!namedSock(my_msg, open_sockets, readable_sockets, hashtable)) 
+        if (!namedSock(my_msg, open_sockets, readable_sockets, writeable_sockets, hashtable)) 
            return NULL;
     }
 
@@ -715,6 +738,19 @@ void processMsg(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
 
 
 
+/* get ip address of a socket */
+char *getip(int sn) {
+    struct sockaddr_in addr;
+    socklen_t csa = sizeof(struct sockaddr_in);
+    getpeername(sn, (struct sockaddr *)&addr, &csa);
+    char *ipstr = "";
+    ipstr = strdup(inet_ntoa(addr.sin_addr));
+    return ipstr;
+}
+
+
+
+
 /* 
     Set the name of the effect from the message, (re)-associate 
     with a particular socket using a hash table as an associative
@@ -723,37 +759,50 @@ void processMsg(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
     Force close any socket no longer associated with a particular
     effect.
 */
-int namedSock (msg_t *my_msg, fd_set *open_sockets, fd_set *readable_sockets, hash_table_t *hashtable) {
+int namedSock (msg_t *my_msg, fd_set *open_sockets, fd_set *readable_sockets, fd_set *writeable_sockets, hash_table_t *hashtable) {
 
     if (!my_msg->effectName || !my_msg->whosTalking) return 0;
 
-    int aSock = get_socket(hashtable, my_msg->effectName);
+    list_t *anEffect = lookup_effect(hashtable, my_msg->effectName);
+    int aSock = 0;
+  
+    if (anEffect != NULL)
+         aSock = anEffect->socket_num;
 
-    if (aSock) {  
+    if (aSock) { 
+ 
         // already have a socket for this effect
+        
         if (aSock != my_msg->whosTalking) {
-            // it's not the same as incomming
-            if (FD_ISSET(aSock, readable_sockets)) { 
-                // yet the old one appears readable - duplicate?
-                if (DEBUG) { cur_time(); printf("->DUPLICATE for %s!  old socket:%d (still seems readable), new socket:%d. IGNORING THIS EFFECT.\n", 
-                    my_msg->effectName, aSock, my_msg->whosTalking); fflush(stdout); }
-
-                // So, our default behaviour is going to be ignore messages from duplicates.
-                return 0;
-
-                // arguably, we could modify the name (couple it with the socket in all cases),
-                // and then be 'agnostic' about duplicates.
-                // add_effect(hashtable, my_msg, 1);  // don't look up, we just did
-            } else {
-                // old socket has closed - effect went away and came back
+ 
+            // TWO sockets for the same effect.  Either it went offline and came back, or there's
+            // a duplicate (two same-named effects on different sockets)
+            if (strcmp(getip(aSock), getip(my_msg->whosTalking))==0) {
                 forceCloseSK(aSock, open_sockets);
                 set_effect_socket(hashtable, my_msg->effectName, my_msg->whosTalking);
-                if (DEBUG) {cur_time();  printf("x   FORCE close old socket on name:%s socket:%d, new socket:%d\n", 
+                if (DEBUG) {cur_time();  printf("x   RE-CONNECT - FORCE close old socket on name:%s socket:%d, new socket:%d\n", 
                    my_msg->effectName, aSock, my_msg->whosTalking);fflush(stdout); }
+            } else {
+                // different ips - it's a duplicate effect.
+                if (DEBUG) {cur_time();  printf("xx  DUPLICATE EFFECT!! name:%s is already on socket:%d. IGNORING THIS EFFECT!\n", 
+                   my_msg->effectName, aSock);fflush(stdout); }
+                return 0;
             }
-        } // else we're fine - just another message from a known socket, or a re-connect
-    } else {
-        add_effect(hashtable, my_msg, 1);  // don't look up, we just did
+        } 
+    } else { 
+   
+        // no socket found for this effect
+
+        // effect found, update its socket
+        if (anEffect != NULL) {
+            set_effect_socket(hashtable,anEffect->effect,my_msg->whosTalking);  // update effect with new socket number
+            if (DEBUG) {cur_time();  printf("updating known effect with now known socket#:%d\n",anEffect->socket_num); fflush(stdout); }
+
+        // brand new effect, store it
+        } else {
+            add_effect(hashtable, my_msg);    // new effect, add to hash table
+            if (DEBUG) {cur_time();  printf("adding new effect with new socket.\n"); fflush(stdout); }
+        }
     }
 
     return 1;
@@ -776,8 +825,8 @@ void send_msg (list_t *my_element, fd_set *open_sockets, char *msg, hash_table_t
     if (FD_ISSET(sock, open_sockets)) { 
         int nBytes = strlen(msg) + 1;
         if (!my_element->do_not_send) {
-            send(sock, msg, nBytes, MSG_NOSIGNAL);
-            if (DEBUG) { cur_time(); printf("<-  sent message:'%s' to %10s on socket:%02d\n",msg,effect,sock); fflush(stdout); }
+            int bsent = send(sock, msg, nBytes, MSG_NOSIGNAL);
+            if (DEBUG) { cur_time(); printf("<-  sent message:'%s' to %10s on socket:%02d  bytes sent:%d\n",msg,effect,sock,bsent); fflush(stdout); }
         } else {
             if (DEBUG) { cur_time(); printf("xx  skipped message:'%s' to %10s on socket:%02d (dns set)\n",msg,effect,sock); fflush(stdout); }
         }
@@ -1394,38 +1443,23 @@ list_t *lookup_effect_sk(hash_table_t *hashtable, int sock_num) {
 
 
 
-/*    add or update a named effect to the hash table.  */
-int add_effect(hash_table_t *hashtable, msg_t *my_msg, int skip_lookup) { 
+/*    
+      Add a named effect to the hash table. 
+
+      We skip looking it up - we do that before we get here.
+ */
+int add_effect(hash_table_t *hashtable, msg_t *my_msg) { 
 
     long   temp;
     list_t *new_element   = NULL; 
     list_t *new_element2  = NULL; 
-    list_t *current_list  = NULL; 
+
     unsigned long hashval = hash(hashtable, my_msg->effectName);  
 
-    if (!skip_lookup) {
-        // Does item already exist? 
-        // as add_effect is only called from one place, after a lookup,
-        // we'll never get to this place.  But, should allow for it.
-        current_list = lookup_effect(hashtable, my_msg->effectName); 
-    }
-
-    if (current_list != NULL) {
-        if (current_list->socket_num != my_msg->whosTalking) { 
-            current_list->socket_num = my_msg->whosTalking;
-            hashtable->modified      = millis();
-            return 3;  			// exists, new socket number set
-        } else {
-            return 2;  			// exists, unchanged
-        }
-    }
-
-    /* two separate copies, one on 'all', one on 'ordered'  */
     new_element = new_node(my_msg->effectName, my_msg->whosTalking);
     if (!new_element) return 1;  		// insert failed 
 
-    new_element2 = new_node(my_msg->effectName, my_msg->whosTalking);
-    if (!new_element2) return 1;  		// insert failed 
+    new_element2 = copy_node(new_element);
 
 
     // append new element to current ordered list if not there already
@@ -1434,6 +1468,7 @@ int add_effect(hash_table_t *hashtable, msg_t *my_msg, int skip_lookup) {
     else if (not_on_list(hashtable->ordered,new_element2))
         hashtable->ordered = concat_lists(hashtable->ordered,new_element2); 
 
+    // prepend to current hash table bucket
     new_element->next         = hashtable->table[hashval]; 
     hashtable->table[hashval] = new_element;
  
@@ -1457,7 +1492,7 @@ list_t *new_node(char*str, int sock) {
     list_t *new_list; 
 
     // allocate memory for new node
-    if ((new_list  = malloc(sizeof(list_t))) == NULL) return NULL;
+    if ((new_list  = (list_t *)malloc(sizeof(list_t))) == NULL) return NULL;
 
     // Populate data
     new_list->effect          = strdup(str);          // explicity copy original into memory 
@@ -1483,14 +1518,9 @@ list_t *new_node(char*str, int sock) {
 list_t *copy_node(list_t *a_node) {
     list_t *new_list; 
 
-    // allocate memory for new node
-    if ((new_list  = malloc(sizeof(list_t))) == NULL) return NULL;
+    new_list = new_node(a_node->effect, a_node->socket_num);
 
-    update_node(a_node,new_list);
-
-    new_list->next            = NULL;
-    new_list->collection      = NULL;
-    new_list->c_mod           = 0L;
+    new_list->do_not_send = a_node->do_not_send;
 
     return new_list;
 }
@@ -1498,12 +1528,11 @@ list_t *copy_node(list_t *a_node) {
 
 
 
-/*   update a node on a list from the hashtable */
+/*   update a node's *data* */
 void update_node(list_t *a_node, list_t *new_list) {
 
-    // Populate data
-    if (new_list->effect == NULL)
-        new_list->effect      = strdup(a_node->effect);
+    if (new_list->effect != NULL) free(new_list->effect);
+    new_list->effect          = strdup(a_node->effect);
 
     new_list->socket_num      = a_node->socket_num; 
     new_list->do_not_send     = a_node->do_not_send;
@@ -1711,6 +1740,7 @@ void free_node_list(list_t *head) {
 
 /*      frees all memory for a given node   */
 void free_node(list_t *node) {
+
     free(node->effect);
     free(node); 
 }

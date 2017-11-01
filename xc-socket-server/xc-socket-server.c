@@ -348,14 +348,12 @@ int main(int argc,char **argv) {
         acceptSK(firstSocket, readable_sockets, &open_sockets, &ipadd);
 
         // seemingly no way to determine *which* socket is readable -
-        // we go through all of them until we've processed on as
-        // many sockets as select() told us were available.
-	for (i=firstSocket+1; i<max_socket+1 && rc; i++)  {
+        // go through, closing dead sockets, reading messages as we find them. 
+	for (i=firstSocket+1; i<max_socket+1; i++)  {
 
             // read incoming, set named effect, get socket number
             if (FD_ISSET(i, &readable_sockets)) {
                 my_msg = readMsg(i, &readable_sockets, &open_sockets, &writeable_sockets, my_hash_table);
-                rc--;  // found a socket, decrement the count
             } else
                 continue;
 
@@ -378,10 +376,6 @@ int main(int argc,char **argv) {
             processMsg(my_msg, &open_sockets, my_hash_table);
 
             free_msg(my_msg);
-
-            // only read from as many sockets as select says have a message
-            rc--;
-            if (rc == 0) i=max_socket+1;
         } 
     } 
 

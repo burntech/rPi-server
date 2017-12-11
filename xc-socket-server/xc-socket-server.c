@@ -12,16 +12,20 @@
    Sep '17  - major updates to handle socket pools, segfaults, clean up code
    Oct '17  - major updates, clean up bad coms, move stuff to subroutines
             - integrated use of hash tables
+   Nov '17  - general improvements, added "timed sequences" vs. blocking routines
 
-// 1) attempt to add clock pulse and sync 8266's
+// 1) kill all signal, free event list (935)
+// 2) timed sequence "parser" for passsing in external sequences (425, 1120)
+// 3) attempt to add clock pulse and sync 8266's (set up NTP server?)
                
    This is intended as a FAST multi-socket select() server,
    running on a raspberry pi 3 (with wifi), in
    conjunction with the Arduino Adafruit Huzzah (the ESP2866
-   wifi enabled board) to create a responsive, wirelessly
+   wifi enabled board) or similar to create a responsive, wirelessly
    distributed microcontroller network.  We're using it to
    link a series of flame-enabled games, and other effects,
-   and trying to limit latency to <2ms throughout.
+   and trying to limit latency to <2ms throughout, while retaining
+   continuous control (e.g. the ability to kill all effects instantly).
 
 
    Why a custom server?  Why not an MQTT broker?  First, We want centralized
@@ -35,7 +39,7 @@
    all transmissions (below human perceptibility).  It can yet be
    better, but pretty good so far - about 100 microseconds for message in
    to first message out.  Bottom line, the server is not currently
-   causing any messaging delays (it's in the huzzah code).
+   causing any messaging delays.
 
    In addition, the clients are presumed to be sending a keep alive
    signal, and the server presumes to keep the sockets open to minimize
@@ -45,21 +49,41 @@
 
    NOTES:
 
+   We're using the RPi 3, and have configured it as
+   an access point with a static IP. 
+
+   Start the server on the command line:
+
+       ./xc-socket-server [1]
+   
+   When the option 1 is added, DEBUG=1, and lots of useful info is dropped 
+   into STDOUT.  When DEBUG is 0, the assumption is no output, and it will 
+   run as a daemon. 
+
+   There are some (questionable) scripts in initscripts that can be linked
+   into /etc/init.d and used to start xc-socket-server at boot, and optionally,
+   but-client as well.  The latter presumes you'll have a physical button on
+   the pi itself as "The Button".  
+
+   ***
+
    TO send messages from one socket to another, you must "set a collection"
    to which a given effect will broadcast.  Note that "the button" (currently
-   effect: 'B') sends messages to *all* effects.  Set a collection by:
+   effect: 'B') sends messages to *all* effects, except those with the DS 
+   (Don't Send) flag set.  Set a collection by:
 
       effectname:*:CC:effectname1,effectname2...
 
    This can be done at any time, whether other effects are present are not, 
    the collection is kept up to date with existing effects.
 
-   We're using the RPi 3, and have configured it as
-   an access point with a static IP. 
+   ***
 
-   When DEBUG=1, the idea is that you would run this at the command
-   prompt, and all debugging info is dropped into STDOUT.  When DEBUG is 0,
-   the assumption is no output, and it will run as a daemon. 
+   Any effect can block the receipt of messages (and be only a sender):
+`
+      effectname:*:DS
+
+   ***
 
    Look in subroutine processMsg() for how and where to 
    insert any custom message handling code.
@@ -73,6 +97,8 @@
 
    You will likely either want to also run but-client.c for the button,
    or use an 8266 for the same purpose.
+
+   ***
 
    To compile:
 
@@ -115,6 +141,10 @@ int	DEBUG           = 0;    // 0=daemon, no output, 1=command line with output
 // PRE-DEFINED OUTGOING MESSAGES
 #define MSG_DIV    	":"     // basic messaging divider
 #define MSG_DIV2    	","     // basic messaging sub-divider
+#define MSG_DIV3    	";"     // basic messaging sub-divider
+#define MSG_DIV4    	"+"     // basic messaging sub-divider
+#define MSG_DIV5    	"->"    // basic messaging sub-divider
+#define MSG_DIV6    	"&"     // basic messaging sub-divider
 #define PoofON 		"$p1%"
 #define PoofOFF		"$p0%"
 #define PoofSTM		"$p2%"
@@ -126,6 +156,7 @@ int	DEBUG           = 0;    // 0=daemon, no output, 1=command line with output
 #define RO       	"RO"    // ctl msg - set round order
 #define CC       	"CC"    // ctl msg - set collection
 #define DS       	"DS"    // ctl msg - set do_not_send flag
+#define XX       	"XX"    // ctl msg - kill all poofers, kill events
 
 #define BUTTON		"B"
 #define BIGBETTY        "BIGBETTY"
@@ -134,16 +165,16 @@ int	DEBUG           = 0;    // 0=daemon, no output, 1=command line with output
 
 
 
-/************** OUR VARIABLES    ******************/
+/************** OUR DATA & VARIABLES    ******************/
 
 
-// hash structure for associative array that will store key / value pairs
+/* hash structure for associative array that stores effects as key / value pairs */
 typedef struct _list_t_ {
     char   *effect;                     // name of the effect
     int     socket_num;                 // socket this effect is on
     int     do_not_send;                // true if broadcast-only effect
     long    c_mod;                      // last update of collection, or 0L 
-    struct _list_t_ *next;              // next effect in the hashtable bucket
+    struct _list_t_ *next;              // next effect on a list, or in the hashtable bucket
     struct _list_t_ *collection;        // list of effects to whom I talk, if any
 } list_t;
 
@@ -190,6 +221,29 @@ typedef struct _msg_t_ {
 
 
 
+/* 
+    list of timed events.  events can apply to multiple effects, and
+    can be "overlapping" (i.e. events can theoretically begin before 
+    other events are finished for potentially complex behavior). 
+
+    thus the list isn't necessarily sequential.  currently presuming
+    one list at a time...
+
+    "begin" is a time in ms.  if '0', event begins upon receipt of 
+    timed sequence, >0 means begin that many ms after initial receipt.
+*/
+typedef struct _event_t_ {
+    char   *action;                     // type of event (e.g. "poof")
+    long    begin;                      // relative time from 0 to begin
+    long    length;                     // length of event in ms
+    int     started;                    // 1 if begun
+    struct _event_t_ *next;             // next event on a list
+    struct _list_t_  *collection;       // list of effects ?
+} event_t;
+
+
+
+
 int     max_socket     = 0;             // will hold the largest possible next socket number
 int     firstSocket    = 0;             // socket to which we listen
 float   start_time     = 0;             // sys clock when we begin
@@ -212,22 +266,25 @@ void    closeSK();
 int     namedSock();
 
 // messaging routines
-msg_t  *new_msg();
-char   *test_part();
-msg_t  *readMsg();
-void    processMsg();
+msg_t   *new_msg();
+char    *copy_str_part();
+msg_t   *readMsg();
+event_t *processMsg();
 void    send_msg ();
 void    send_all();
-void    doControl();
+event_t *doControl();
 
 // buttons and poofing
-void    doButton();
+event_t *doButton();
 void    theButton();
-void    bigRound();
-void    roundRobbin();
 void    poofStorm();
-void    lulu_poof();
+event_t *bigRound();
+event_t *roundRobbin();
+event_t *lulu_poof();
 void    bigbetty_poof();
+
+event_t *new_event();
+event_t *check_events();
 
 // utilities
 void    error();
@@ -235,6 +292,7 @@ void    cur_time();
 long    millis();
 int     naive_str2int ();
 void    delay();
+void    delay_micro();
 
 // lists and collections
 void    set_collection();
@@ -270,6 +328,8 @@ void    free_msg();
 void    free_table();
 void    free_node_list();
 void    free_node();
+void    free_event_list();
+void    free_event();
 
 
 
@@ -299,7 +359,6 @@ void    free_node();
 int main(int argc,char **argv) {
 
     // socket server variables 
-    int            rc;
     int		   i;				// index counters for loop operations
     fd_set	   open_sockets;   		// set of open sockets
     fd_set	   readable_sockets; 		// set of sockets available to be read
@@ -307,17 +366,14 @@ int main(int argc,char **argv) {
     char           *ipadd;
 
     hash_table_t   *my_hash_table;		// hash for holding effect names, sockets, properties
-
     msg_t          *my_msg;	 		// struct for holding incoming message components
+    event_t        *my_events = NULL;		// struct for holding the current timed sequence
+    event_t        *an_event;            	// struct for holding an incoming timed sequence
+    long           seq_start  = 0L;             // start time for timed sequence
 
     int            size_of_table 
                      = (int)maxclients/2;       // theorectically, a max of 2 per bucket, ideal.
 
-// NOT right, sockeet numbers aren't 0..maxclients!!
-// also, plug unplug, still @#$@#$ seg-faulting.
-//    char          *ips[maxclients];
-
-//    for(i=0; i<maxclients; i++) ips[i] = NULL;  
 
     // Make this server a DAEMON if not debugging
     forkify(argc, argv);
@@ -340,11 +396,10 @@ int main(int argc,char **argv) {
 
 	// check which sockets are ready for reading.     
         // (null in timeout means wait until incoming data)
-        rc = select(max_socket+1, &readable_sockets, &writeable_sockets, NULL, (struct timeval *)NULL);
+        select(max_socket+1, &readable_sockets, &writeable_sockets, NULL, (struct timeval *)NULL);
 
         // return from select - add incoming sockets to pool 
         ipadd = "";
-        //int sk = acceptSK(firstSocket, readable_sockets, &open_sockets, &ipadd);
         acceptSK(firstSocket, readable_sockets, &open_sockets, &ipadd);
 
         // seemingly no way to determine *which* socket is readable -
@@ -372,13 +427,26 @@ int main(int argc,char **argv) {
             if (my_msg->firstMsg == NULL || (my_msg->firstMsg && strcmp(my_msg->firstMsg,KeepAlive)==0))  
                 continue; 
 
-            // do something with a meaningful message
-            processMsg(my_msg, &open_sockets, my_hash_table);
+            // do something with a meaningful message.
+            // could return a timed sequence, which we set along with the start time
+            an_event = processMsg(my_msg, &open_sockets, my_hash_table);
+            if (an_event != NULL) {
+// DOESN'T SEEM RIGHT! - what if already events?!  concat?
+                 my_events = an_event;
+// CAN'T be right for same reason - if it's zeor, this  is ok, but otherwise, hm, need to adjust time to any added events?
+                 seq_start = millis();
+            }
 
             free_msg(my_msg);
-        } 
+        }
+
+        // take care of any timed events
+        my_events = check_events(my_events, seq_start, &open_sockets, my_hash_table); 
+
+        delay_micro(10);  // still need a teeny delay to keep from using up all processor cycles?
     } 
 
+    free_event_list(my_events);
     free_table(my_hash_table);
 
     return(0);
@@ -607,24 +675,24 @@ msg_t *new_msg(char *str, int sock) {
     char *part;
     
     // Populate data
-    part = test_part(strtok(str,MSG_DIV));
+    part = copy_str_part(strtok(str,MSG_DIV));
     newmsg->effectName = part;
 
     if (part != NULL) 
-      newmsg->firstMsg = test_part(strtok(NULL,MSG_DIV));
+      newmsg->firstMsg = copy_str_part(strtok(NULL,MSG_DIV));
 
     if (newmsg->firstMsg != NULL) 
-      newmsg->secondMsg = test_part(strtok(NULL,MSG_DIV));
+      newmsg->secondMsg = copy_str_part(strtok(NULL,MSG_DIV));
     else 
       newmsg->secondMsg = NULL;
 
     if (newmsg->secondMsg!= NULL) 
-      newmsg->thirdMsg = test_part(strtok(NULL,MSG_DIV));
+      newmsg->thirdMsg = copy_str_part(strtok(NULL,MSG_DIV));
     else 
       newmsg->thirdMsg = NULL;
 
     if (newmsg->thirdMsg != NULL) 
-      newmsg->fourthMsg = test_part(strtok(NULL,MSG_DIV));
+      newmsg->fourthMsg = copy_str_part(strtok(NULL,MSG_DIV));
     else 
       newmsg->fourthMsg = NULL;
 
@@ -636,8 +704,7 @@ msg_t *new_msg(char *str, int sock) {
 
 
 
-/*     return a copy of the string, if any, less trailing escape characters    */
-char *test_part(char *str) {
+char *clean_str_part(char *str) {
     if      (str == NULL) return NULL;
     else if (!strlen(str)) return NULL;
 
@@ -649,6 +716,17 @@ char *test_part(char *str) {
             str[i] = '\0';
         i++;
     }
+
+    return str;
+}
+
+
+/*     return a copy of the string, if any, less trailing escape characters    */
+char *copy_str_part(char *str) {
+    if      (str == NULL) return NULL;
+    else if (!strlen(str)) return NULL;
+
+    str = clean_str_part(str);
 
     return strdup(str);
 }
@@ -699,17 +777,20 @@ msg_t *readMsg(int socket, fd_set *readable_sockets, fd_set *open_sockets, fd_se
 
 
 /* given an incoming message, do the right thing with that message */
-void processMsg(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
+event_t *processMsg(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
+
+    event_t *timed_sequence;
+    timed_sequence = NULL;
 
     if (strcmp(my_msg->firstMsg,CONTROL)==0) {
 
         // Handle a "control" message.
-        doControl(my_msg, open_sockets, hashtable);
+        timed_sequence = doControl(my_msg, open_sockets, hashtable);
 
     } else if (strcmp(my_msg->effectName,BUTTON)==0) {
 
        // Handle a message from the button
-        doButton(my_msg, open_sockets, hashtable);
+        timed_sequence = doButton(my_msg, open_sockets, hashtable);
 
     } else if (my_msg->firstMsg != NULL) {
     
@@ -727,6 +808,8 @@ void processMsg(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
             send_to_collection(my_msg, self, open_sockets, hashtable);
             
     } // end there's a message
+
+    return timed_sequence;
 }
 
 
@@ -842,9 +925,15 @@ void send_all(int whosTalking, fd_set *open_sockets, hash_table_t *hashtable, ch
 
 
 /* process incoming control message */
-void doControl(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
+event_t *doControl(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
 
-    if (strcmp(my_msg->secondMsg,RO)==0) {         // setting round order
+    event_t *timed_sequence;
+    timed_sequence = NULL;
+
+    if (strcmp(my_msg->secondMsg,XX)==0) {         // kill all!
+// send kill all message
+// free event list if any (here?  or in main loop better?
+    } else if (strcmp(my_msg->secondMsg,RO)==0) {  // setting round order
         set_list_order(hashtable, my_msg);
     } else if (strcmp(my_msg->secondMsg,CC)==0) {  // creatiang a collection
         set_collection(hashtable, my_msg);
@@ -852,8 +941,189 @@ void doControl(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
         set_effect_ds(hashtable, my_msg->effectName, my_msg->thirdMsg);
     } else {
         // more eventually....
+
+        // look for incoming timed sequence and parse here?
     }
+
+    return timed_sequence;
 }
+
+
+
+
+
+
+
+/* EVENT ROUTINES  */
+
+/*     create a new single-event list  */
+event_t *new_event(char *str, long begin, int length, list_t *collection) {
+    event_t *new_event; 
+
+    // allocate memory 
+    if ((new_event  = (event_t *)malloc(sizeof(event_t))) == NULL) return NULL;
+
+    // Populate data
+    new_event->action       = strdup(str);          // explicity copy original into memory 
+    new_event->begin        = begin;
+    new_event->length       = length;
+    new_event->started      = 0;
+
+    // linked lists
+    new_event->next         = NULL;
+    new_event->collection   = collection;
+
+    return new_event;
+}
+
+
+
+
+/* check all events in the current timed sequence */
+event_t *check_events(event_t *events, long seq_start, fd_set *open_sockets, hash_table_t *hashtable) {
+
+    if (events == NULL) return NULL;
+
+    long     now = millis();
+
+    list_t  *this_node;
+    event_t *this_event, *last_event, *drop_event;
+
+    this_event = events;
+    last_event = NULL;
+    drop_event = NULL;
+
+
+    while (this_event!= NULL) {
+
+        if ( now > (seq_start + this_event->begin) && !this_event->started ) {
+            // begin action
+            this_node = this_event->collection;
+            while (this_node != NULL) {
+                if (strcmp(this_event->action,"poof") == 0) {
+                    send_msg(this_node, open_sockets, PoofON, hashtable);
+                }
+                this_node = this_node->next;
+            }
+            this_event->started = 1;
+        } else if ( now > (seq_start + this_event->begin + this_event->length) ) {
+            // complete action
+            this_node = this_event->collection;
+            while (this_node != NULL) {
+                if (strcmp(this_event->action,"poof") == 0) {
+                    send_msg(this_node, open_sockets, PoofOFF, hashtable);
+                }
+                this_node = this_node->next;
+            }
+
+            // drop this event from the list
+            if (last_event != NULL) {
+                last_event->next = this_event->next;
+            } else {
+                events = this_event->next;
+            }
+            drop_event = this_event;
+        }
+
+
+        // drop completed events from the list
+        if (drop_event != NULL) {
+            this_event = this_event->next;
+            free_event(drop_event);
+            drop_event = NULL;
+        } else {
+            last_event = this_event;
+            this_event = this_event->next;
+        }
+ 
+    }
+    
+    // returns an ever smaller list, eventually null
+    return events;
+}
+
+
+
+
+/*
+    appends second eventlist to first by iterating through the first.
+    thus, faster if the first event list is the short one.
+*/
+event_t *concat_events(event_t *first_event, event_t *second_event) { 
+
+    event_t *current = NULL;
+
+    if (!first_event)  return second_event;
+    if (!second_event) return first_event;
+
+    for (current=first_event; current->next !=NULL; current=current->next);
+
+    current->next = second_event;
+
+    return first_event;
+}
+
+
+
+
+event_t *parse_events(char *str){
+
+  
+
+    event_t *events;
+    events = NULL;
+    char *action;
+    char *effect[12];
+    long begin, length;
+    int  sub_effect[24];
+
+
+//#define MSG_DIV3    	";"     // basic messaging sub-divider
+//#define MSG_DIV4    	"+"     // basic messaging sub-divider
+//#define MSG_DIV5    	"->"    // basic messaging sub-divider
+//#define MSG_DIV6    	"&"    // basic messaging sub-divider
+
+    //  CONTROL:*:EV:poof,0,2000,DRAGON;poof,1000,2000,ENTRYWAY&ENTRYWAY2
+    //  str = poof,0,2000,DRAGON;poof,1000,2000,ENTRYWAY&ENTRYWAY2
+    //  str = poof,400,800,ORGAN->3+4;poof,800,800,ORGAN->5+6;poof,1200,800,ORGAN->7+8;poof,1600,800,ORGAN->9+10;poof,2000,800,ORGAN->11+12;
+    char *part = clean_str_part(strtok(str,MSG_DIV3));
+
+    while (part != NULL) {
+
+    //  part = "poof,0,800,ORGAN->1+2;"
+    //  part = "poof,0,800,ENTRYWAY&AERIAL;"
+    //  part = "poof,0,800,ORGAN->3&AERIAL;"
+
+        char *action = clean_str_part(strtok(part,MSG_DIV2));
+
+        // HM.  need naive_str2long...
+
+        begin  = (long)naive_str2int(clean_str_part(strtok(NULL,MSG_DIV2)));
+        length = (long)naive_str2int(clean_str_part(strtok(NULL,MSG_DIV2)));
+
+        char *collection = clean_str_part(strtok(NULL,MSG_DIV2));
+    
+        //  collection = "ORGAN->1+2&ENTRYWAY"
+
+        char *effect = clean_str_part(strtok(collection,MSG_DIV6));
+        while (effect != NULL) {
+
+            //  effect = "ORGAN->1+2"
+            char *name = clean_str_part(strtok(effect,MSG_DIV5));
+            char *subs = clean_str_part(strtok(NULL,MSG_DIV5));
+
+            effect = clean_str_part(strtok(NULL,MSG_DIV6));
+        }
+
+// NOT sure this is still valid?  in fact, I seriously doubt it.
+        part = clean_str_part(strtok(NULL,MSG_DIV3));
+    }
+
+
+    return events;
+}
+
+
 
 
 
@@ -865,10 +1135,13 @@ void doControl(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
 
 
 /* process incoming message from the button */
-void doButton(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
+event_t *doButton(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
 
-    int	which_but = 0; 		// number of button currently pushed/released
-    int butstate  = 0;		// 1 if pressed, 0 if released
+    event_t *timed_sequence;
+    timed_sequence = NULL;
+
+    int	which_but  = 0; 	// number of button currently pushed/released
+    int butstate   = 0;		// 1 if pressed, 0 if released
 
     if (my_msg->firstMsg != NULL) {
         which_but = naive_str2int(my_msg->firstMsg);
@@ -885,37 +1158,71 @@ void doButton(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
             send_all(my_msg->whosTalking, open_sockets, hashtable, p_msg);
         } else if (which_but==2 && butstate==1) {
             // do a round
-            bigRound(my_msg->whosTalking, open_sockets, hashtable);
+            timed_sequence = bigRound(my_msg->whosTalking, open_sockets, hashtable);
         } else if (which_but==3 && butstate==1) {   
             // send poofstorm!
             send_all(my_msg->whosTalking, open_sockets, hashtable, PoofSTM);
         }
     }
+
+    return timed_sequence;
 }
 
 
 
 
-// NOTE THAT ALL THESE ARE BLOCKING ROUTINES!!!! NEED TO FIX THAT 
+/* The following all generate (and return) timed sequences, and are non-blocking */
+
 
 /*  Go around in a "circle" several times, faster, then big finish */
-void bigRound(int whosTalking, fd_set *open_sockets, hash_table_t *hashtable) {
+event_t *bigRound(int whosTalking, fd_set *open_sockets, hash_table_t *hashtable) {
 
     if (DEBUG) { cur_time(); printf("\tLet's Have a big ROUND!!\n");  fflush(stdout); }
 
     list_t *all_elements =  get_ordered_list(hashtable);
     int poof_time = ROpoofLength;
 
-    roundRobbin(whosTalking, hashtable,all_elements,open_sockets,poof_time,240);
-    roundRobbin(whosTalking, hashtable,all_elements,open_sockets,poof_time,130);
-    roundRobbin(whosTalking, hashtable,all_elements,open_sockets,poof_time,80);
-    roundRobbin(whosTalking, hashtable,all_elements,open_sockets,poof_time,50);
-    roundRobbin(whosTalking, hashtable,all_elements,open_sockets,poof_time,40);
-    roundRobbin(whosTalking, hashtable,all_elements,open_sockets,poof_time,30);
-    roundRobbin(whosTalking, hashtable,all_elements,open_sockets,poof_time,30);
+    event_t *round, *big_round;
+    long  cur_start = 0L;
 
-    lulu_poof(lookup_effect(hashtable, LULU), open_sockets, 1, hashtable);
-    bigbetty_poof(lookup_effect(hashtable, BIGBETTY), open_sockets, 5000, hashtable);
+    round     = roundRobbin(whosTalking, all_elements, poof_time, 240, &cur_start);
+    big_round = round; 
+    cur_start += 130;
+    round     = roundRobbin(whosTalking, all_elements, poof_time, 130, &cur_start);
+    big_round = concat_events(big_round,round); 
+    cur_start += 80;
+    round     = roundRobbin(whosTalking, all_elements, poof_time, 80, &cur_start);
+    big_round = concat_events(big_round,round); 
+    cur_start += 50;
+    round     = roundRobbin(whosTalking, all_elements, poof_time, 50, &cur_start);
+    big_round = concat_events(big_round,round); 
+    cur_start += 40;
+    round     = roundRobbin(whosTalking, all_elements, poof_time, 40, &cur_start);
+    big_round = concat_events(big_round,round); 
+    cur_start += 30;
+    round     = roundRobbin(whosTalking, all_elements, poof_time, 30, &cur_start);
+    big_round = concat_events(big_round,round); 
+    cur_start += 30;
+    round     = roundRobbin(whosTalking, all_elements, poof_time, 30, &cur_start);
+    big_round = concat_events(big_round,round); 
+    cur_start += 30;
+
+    list_t *eff;
+    eff = lookup_effect(hashtable, LULU);
+
+    if (eff != NULL) {
+        round     = lulu_poof(eff, &cur_start);
+        big_round = concat_events(big_round,round); 
+        cur_start += 30;
+    }
+
+    eff = lookup_effect(hashtable, BIGBETTY);
+    if (eff != NULL) {
+        round = new_event("poof", cur_start, 5000L, copy_node(eff) );
+        big_round = concat_events(big_round,round); 
+    }
+
+    return big_round;
 }
 
 
@@ -926,62 +1233,80 @@ void bigRound(int whosTalking, fd_set *open_sockets, hash_table_t *hashtable) {
 
     poof the effects in a given order, for a length of time, with a particular delay 
 */
-void roundRobbin(int whosTalking, hash_table_t *hashtable, list_t *all_elements, fd_set *open_sockets, int the_poof, int the_wait) {
+event_t *roundRobbin(int whosTalking, list_t *all_elements, int the_poof, int the_wait, long *start_time) {
 
-    int mySock  = 0;
+    event_t *my_events, *cur_event;
+
+    int      my_sock   = 0;
+    long     my_start  = *start_time;
+
+    my_events          = NULL;
 
     // send message to everyone on the list expcept the originating socket
     while (all_elements!= NULL) {
-        mySock = all_elements->socket_num;
 
-        if (mySock != whosTalking) {
-            send_msg(all_elements, open_sockets, PoofON, hashtable);
-            delay(the_poof);
-            send_msg(all_elements, open_sockets, PoofOFF, hashtable);
+        my_sock = all_elements->socket_num;
+        if (my_sock != whosTalking) {
+            event_t *event = new_event("poof", my_start, (long)the_poof, copy_node(all_elements) );
+            if (my_events ==  NULL) {
+                my_events = event;
+                cur_event = my_events;
+            } else {
+                cur_event->next = event;
+                cur_event = event;
+            }
+            my_start = my_start + (long)the_poof + (long)the_wait;
         }
+
         all_elements = all_elements->next;
-        delay(the_wait);   
     }
+
+    *start_time = my_start;
+    return my_events;
 }
 
 
 
 
-void lulu_poof (list_t *my_element, fd_set *open_sockets, int s, hash_table_t *hashtable) {
+event_t *lulu_poof(list_t *my_element, long *start_time) {
 
-    if (my_element==NULL) return; 
+    if (my_element == NULL) return NULL;
+
+    event_t   *my_events, *cur_event;
+    my_events  = NULL;
+    long     my_start  = *start_time;
+
+
     int mySock = my_element->socket_num;
 
-    if (!mySock) { return; }
+    if (!mySock) { return NULL; }
 
     int xx;
     for (xx=0; xx<4; xx++) {
-        send_msg(my_element, open_sockets, PoofON, hashtable);
-        delay(80);
-        send_msg(my_element, open_sockets, PoofOFF, hashtable);
-        delay(50);
+
+        event_t *event = new_event("poof", my_start, 80L, copy_node(my_element) );
+        if (my_events ==  NULL) {
+            my_events = event;
+            cur_event = my_events;
+        } else {
+            cur_event->next = event;
+            cur_event = event;
+        }
+        my_start += 80L + 50L;
+
     }
-    delay(500);
-    send_msg(my_element, open_sockets, PoofON, hashtable);
-    delay(1600);
-    send_msg(my_element, open_sockets, PoofOFF, hashtable);
 
+    event_t *event = new_event("poof", my_start+500L, 1600L, copy_node(my_element) );
+    cur_event->next = event;
+    cur_event = event;
+    my_start += 500L + 1600L;
+
+    *start_time = my_start;
+    return my_events;
 }
 
 
 
-
-void bigbetty_poof (list_t *my_element, fd_set *open_sockets, int s, hash_table_t *hashtable) {
-
-    if (my_element==NULL) return; 
-    int mySock = my_element->socket_num;
-    if (!mySock) { return; }
-
-    send_msg(my_element, open_sockets, PoofON, hashtable);
-    delay(s);
-    send_msg(my_element, open_sockets, PoofOFF, hashtable);
-
-}
 
 
 
@@ -1051,6 +1376,19 @@ void delay (unsigned int howLong) {
 
   sleeper.tv_sec  = (time_t)(howLong / 1000) ;
   sleeper.tv_nsec = (long)(howLong % 1000) * 1000000 ;
+
+  nanosleep (&sleeper, &dummy) ;
+}
+
+
+
+/* delays some number of microseconds  */
+void delay_micro (unsigned int howLong) {
+
+  struct timespec sleeper, dummy ;
+
+  sleeper.tv_sec  = (time_t)(howLong / 1000000) ;
+  sleeper.tv_nsec = (long)(howLong % 1000000) * 1000000 ;
 
   nanosleep (&sleeper, &dummy) ;
 }
@@ -1244,7 +1582,7 @@ list_t *get_list(hash_table_t *hashtable, char *input) {
     list_t *position     = NULL;
     list_t *effect;
     
-    char *part = test_part(strtok(input,MSG_DIV2));
+    char *part = copy_str_part(strtok(input,MSG_DIV2));
 
     while (part != NULL) {
 
@@ -1264,7 +1602,7 @@ list_t *get_list(hash_table_t *hashtable, char *input) {
             position->next = new_list;
             position = position->next;
         }
-        part = test_part(strtok(NULL,MSG_DIV2));
+        part = copy_str_part(strtok(NULL,MSG_DIV2));
     }
 
     return ordered_list; 
@@ -1510,6 +1848,9 @@ list_t *new_node(char*str, int sock) {
      properties), but be included on a different list.
 */
 list_t *copy_node(list_t *a_node) {
+
+    if (a_node == NULL) return NULL;
+
     list_t *new_list; 
 
     new_list = new_node(a_node->effect, a_node->socket_num);
@@ -1734,7 +2075,32 @@ void free_node_list(list_t *head) {
 
 /*      frees all memory for a given node   */
 void free_node(list_t *node) {
-
     free(node->effect);
+    free_node_list(node->collection); 
     free(node); 
+}
+
+
+
+
+/*    frees all memory used by a linked list of events    */
+void free_event_list(event_t *head) {
+    event_t *pos, *temp;
+    pos = head;
+    while(pos!=NULL) { 
+        temp = pos; 
+        pos  = pos->next; 
+        free_event(temp);
+    } 
+    head = NULL;
+}
+
+
+
+
+/*      frees all memory for a given event   */
+void free_event(event_t *event) {
+    free(event->action);
+    free_node_list(event->collection); 
+    free(event); 
 }

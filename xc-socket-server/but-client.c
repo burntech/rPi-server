@@ -88,8 +88,8 @@ long    maxIdle    = 300000L;   // milliseconds network idle before keep alive s
 
 
 /* you may wish to change these...  */
-#define numbtns   2
-int     buttons[numbtns] = {butPin1,butPin2};
+#define numbtns 3
+int     buttons[numbtns] = {butPin1,butPin2,butPin3};
 
 
 

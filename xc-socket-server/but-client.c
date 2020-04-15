@@ -8,7 +8,8 @@
   
 	This is a "simple" networked button detection client, part of 
         the custom client - server software that runs the Carnival, and
-        specifically provides for an onboard button on the raspberry pi.
+        specifically provides for up to 3 onboard buttons on the raspberry pi
+        (which is in turn runing the xc-socket server as the Carnival). .
         Alternatively, you can use the huzzahClient, with WHOAMI = "B".
         
         It can be run at startup as a daemon when not in DEBUG mode.  
@@ -73,10 +74,15 @@ int	DEBUG      = 0;	        /* 0=daemon, 1=command line	*/
 #define OFF        HIGH 
 #define stdDelay   1            /* loop round trip (ms)		*/
 #define butDelay   2000     	/* delay after round,etc (ms)	*/
-#define butPin1    14      	
-#define butPin2    15  
-#define butPin3    18  
+#define butPin1    14      	/* third pin down on the right  */
+#define butPin2    15       	/* fourth pin down on the right */          
+#define butPin3    18       	/* fifth pin down on the right  */ 
 
+
+// String messages we want to send regularly.  Basically, button is on or off, and might be Button 1, 2, 3....
+// So, push[0] is the message for Button 1 = 1 / is pushed, release[0] is when a release is pushed.
+
+// General form of message is EFECT NAME[:Msg1][:Msg2][:Msg3][:Msg4]
 //char*   HELLO      = "B:HELLO:0:*:0";
 char*   KEEPALIVE  = "B:KA:0";
 char*   NO_SEND    = "B:*:DS:1";

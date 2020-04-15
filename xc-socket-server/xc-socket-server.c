@@ -14,6 +14,17 @@
             - integrated use of hash tables
    Nov '17  - general improvements, added "timed sequences" vs. blocking routines
 
+// Aug 18 - note - need a way to know how many poofers an effect has (i.e. loki)
+//  so we can individually adress solenoids?  How was the organ working?
+
+
+// 0) (771) - uh oh.  not reading messages right in high traffic?
+
+   fundamental issue here is that client needs to add $...% to beginning
+   and end of messages, server needs to look through buffer for those 
+   characters, and should handle a) multiple msgs in buffer and 
+   b) message longer than buffer.  client likely has the same issue.
+
 // 1) kill all signal, free event list (935)
 // 2) timed sequence "parser" for passsing in external sequences (425, 1120)
 // 3) attempt to add clock pulse and sync 8266's (set up NTP server?)
@@ -43,7 +54,7 @@
 
    In addition, the clients are presumed to be sending a keep alive
    signal, and the server presumes to keep the sockets open to minimize
-   delay.  The various lists and collections are kept up to date with
+   delay.  The various lists and existing collections are kept up to date with
    modification times, so once all the effects are online, far fewer
    "lookups" are required.
 
@@ -138,14 +149,14 @@ int	DEBUG           = 0;    // 0=daemon, no output, 1=command line with output
 #define ROpoofDelay	40 	// milliseconds delay between poofs roundOrder 	
 
 
-// PRE-DEFINED OUTGOING MESSAGES
-#define MSG_DIV    	":"     // basic messaging divider
-#define MSG_DIV2    	","     // basic messaging sub-divider
-#define MSG_DIV3    	";"     // basic messaging sub-divider
-#define MSG_DIV4    	"+"     // basic messaging sub-divider
-#define MSG_DIV5    	"->"    // basic messaging sub-divider
-#define MSG_DIV6    	"&"     // basic messaging sub-divider
-#define PoofON 		"$p1%"
+// PRE-DEFINED OUTGOING MESSAGES  / MESSAGE STRUCTURE
+#define MSG_DIV    	":"     // primary internal messaging divider ("EFFECT[:msg1][:msg2][:msg3][:msg4]")
+#define MSG_DIV2    	","     // secondary sub-divider (eg msg2 = "EFFECT1,EFFECT2..."
+//#define MSG_DIV3    	";"     // sub-divider used by parse_events
+//#define MSG_DIV4    	"+"     // sub-divider used by parse_events
+//#define MSG_DIV5    	"->"    // sub-divider used by parse_events
+//#define MSG_DIV6    	"&"     // sub-divider used by parse_events
+#define PoofON 		"$p1%"  // NEED TO MODIFY SEND MESG TO PRE- POST-PEND THE $ AND %
 #define PoofOFF		"$p0%"
 #define PoofSTM		"$p2%"
 
@@ -217,6 +228,7 @@ typedef struct _msg_t_ {
     char   *thirdMsg;
     char   *fourthMsg;
     int     whosTalking;                // socket this effect is on
+    struct _msg_t_ *next;               // next msg on the list, if any
 } msg_t;
 
 
@@ -268,7 +280,7 @@ int     namedSock();
 // messaging routines
 msg_t   *new_msg();
 char    *copy_str_part();
-msg_t   *readMsg();
+event_t *readBuffer();
 event_t *processMsg();
 void    send_msg ();
 void    send_all();
@@ -283,8 +295,10 @@ event_t *roundRobbin();
 event_t *lulu_poof();
 void    bigbetty_poof();
 
+// events
 event_t *new_event();
 event_t *check_events();
+event_t *concat_events();
 
 // utilities
 void    error();
@@ -366,10 +380,9 @@ int main(int argc,char **argv) {
     char           *ipadd;
 
     hash_table_t   *my_hash_table;		// hash for holding effect names, sockets, properties
-    msg_t          *my_msg;	 		// struct for holding incoming message components
-    event_t        *my_events = NULL;		// struct for holding the current timed sequence
-    event_t        *an_event;            	// struct for holding an incoming timed sequence
-    long           seq_start  = 0L;             // start time for timed sequence
+    event_t        *my_events  = NULL;		// struct for holding the current timed sequence
+    event_t        *new_events = NULL;		// new timed sequences
+    long           seq_start   = 0L;            // start time for timed sequence
 
     int            size_of_table 
                      = (int)maxclients/2;       // theorectically, a max of 2 per bucket, ideal.
@@ -402,48 +415,23 @@ int main(int argc,char **argv) {
         ipadd = "";
         acceptSK(firstSocket, readable_sockets, &open_sockets, &ipadd);
 
-        // seemingly no way to determine *which* socket is readable -
-        // go through, closing dead sockets, reading messages as we find them. 
+        // go through sockets and read buffer from any readable sockets (and internally process messages)
 	for (i=firstSocket+1; i<max_socket+1; i++)  {
 
             // read incoming, set named effect, get socket number
-            if (FD_ISSET(i, &readable_sockets)) {
-                my_msg = readMsg(i, &readable_sockets, &open_sockets, &writeable_sockets, my_hash_table);
-            } else
-                continue;
-
-            // skip mal-formed messages (no message at all/no identifier, no socket?)
-            if (!my_msg || !my_msg->whosTalking)
-                continue;
-
-            // show message if debugging
-            if (DEBUG) {
-                cur_time();
-                printf("->  %s on socket#:%02d firstMsg:'%s' secondMsg:'%s'\n",
-		my_msg->effectName,i,my_msg->firstMsg,my_msg->secondMsg);
-		fflush(stdout); }
-
-            // no need to process empty messages or keep alive signals
-            if (my_msg->firstMsg == NULL || (my_msg->firstMsg && strcmp(my_msg->firstMsg,KeepAlive)==0))  
-                continue; 
-
-            // do something with a meaningful message.
-            // could return a timed sequence, which we set along with the start time
-            an_event = processMsg(my_msg, &open_sockets, my_hash_table);
-            if (an_event != NULL) {
-// DOESN'T SEEM RIGHT! - what if already events?!  concat?
-                 my_events = an_event;
-// CAN'T be right for same reason - if it's zeor, this  is ok, but otherwise, hm, need to adjust time to any added events?
-                 seq_start = millis();
+            if (FD_ISSET(i, &readable_sockets)) 
+                new_events = readBuffer(i, &readable_sockets, &open_sockets, &writeable_sockets, my_hash_table);
+            if (new_events) {
+                my_events = concat_events(my_events,new_events);
+// kind of presumes there wasn't already a seq_start?
+                seq_start = millis();
             }
 
-            free_msg(my_msg);
         }
 
         // take care of any timed events
         my_events = check_events(my_events, seq_start, &open_sockets, my_hash_table); 
 
-        delay_micro(10);  // still need a teeny delay to keep from using up all processor cycles?
     } 
 
     free_event_list(my_events);
@@ -673,7 +661,8 @@ msg_t *new_msg(char *str, int sock) {
     if ((newmsg = (msg_t *)malloc(sizeof(msg_t))) == NULL) return NULL;
 
     char *part;
-    
+   
+ 
     // Populate data
     part = copy_str_part(strtok(str,MSG_DIV));
     newmsg->effectName = part;
@@ -698,13 +687,17 @@ msg_t *new_msg(char *str, int sock) {
 
     newmsg->whosTalking = sock;
 
+    newmsg->next = NULL;
+
     return newmsg;
 }
 
 
 
 
+/*     remove trailing escape escape characters    */
 char *clean_str_part(char *str) {
+
     if      (str == NULL) return NULL;
     else if (!strlen(str)) return NULL;
 
@@ -721,8 +714,11 @@ char *clean_str_part(char *str) {
 }
 
 
-/*     return a copy of the string, if any, less trailing escape characters    */
+
+
+/*     return a "clean" copy of the string  */
 char *copy_str_part(char *str) {
+
     if      (str == NULL) return NULL;
     else if (!strlen(str)) return NULL;
 
@@ -734,10 +730,46 @@ char *copy_str_part(char *str) {
 
 
 
-/* 
-  read incoming message into approriate strings.  
 
-  message looks like:  "B:1:0"
+
+
+msg_t *makeMsg(int socket, char *line, fd_set *open_sockets, fd_set *readable_sockets, fd_set *writeable_sockets,  hash_table_t *hashtable) {
+
+
+    msg_t *tmp    = NULL;
+    msg_t *my_msg = NULL;
+
+    tmp           = new_msg(line, socket);
+
+    // get name of effect, associate socket with that effect as needed
+
+    if (!namedSock(tmp, open_sockets, readable_sockets, writeable_sockets, hashtable)) 
+        free_msg(tmp);
+    else 
+        my_msg = tmp;
+
+    return my_msg;
+}
+
+
+
+
+
+
+
+
+/* 
+
+  Continusouly read socket into a 1K buffer, process through buffer lookinng for messages. 
+  Finds messages that are terminated with CR LF (13 10), or with null (0), or possiblrye both (13 10 0).  
+  Message my cross buffers, (ie start at the end of one and end at the begginingn fo the next) - we
+  handle that, but only to the length to two buffers (no overruns!).
+
+  Process each incoming message, dividing it up into its components, and either do something in response
+  to the message, or collecting timed events from the message, or just... ignoring it (has no purpose or
+  destination).
+
+  Typical message looks like:  "B:1:0"
   
     effectName = "B"
     firstMsg   = "1"
@@ -746,41 +778,167 @@ char *copy_str_part(char *str) {
     whosTalking will equal the socket that sent the message.
   
 */
-msg_t *readMsg(int socket, fd_set *readable_sockets, fd_set *open_sockets, fd_set *writeable_sockets,  hash_table_t *hashtable) {
+event_t *readBuffer(int socket, fd_set *readable_sockets, fd_set *open_sockets, fd_set *writeable_sockets,  hash_table_t *hashtable) {
 
-    msg_t *my_msg = NULL;
-    int    received  = 0;
-    char   buf[BUFLEN+1]; 
+    event_t *my_events  = NULL;                // list of outgoing events
+    msg_t   *my_msg     = NULL;                // pointer to a potential message structure
+    int      cur_pos    = 0;                   // current position in the buffer
+    int      cur_begin  = 0;                   // position of beginnig of current line
+    int      rc         = 1;
+    int      partial    = 0;                   // 0 if none, else size of last string
 
-    memset(buf,0,BUFLEN);	        // clear buffer 
-    int rc = read(socket, buf, BUFLEN);	// read from the socket 
+    char buf[BUFLEN+1];                        // +1 guarantees a zero at the end
+    char last_string[2*BUFLEN+1];              // +1 guarantees a zero at the end
 
-    if (rc < 1) {
-        if (DEBUG) { cur_time(); printf("x\tclosing socket:%d, can't read\n",socket);fflush(stdout); }
-        closeSK(socket, open_sockets, hashtable);
-    } else if (buf[0] < 32) {
-        // skip escaped characters 
-        return NULL;
-    } else {
-        received = socket;
-        my_msg   = new_msg(buf, received);
+    memset(last_string,0,2*BUFLEN+1);	       // zero out buffer
 
-        // get name of effect, associate socket with that effect as needed
-        if (!namedSock(my_msg, open_sockets, readable_sockets, writeable_sockets, hashtable)) 
-           return NULL;
-    }
 
-    return my_msg;
-}
+    while (rc > 0 || partial) {
+
+        cur_pos       = 0;                  // reset position
+        cur_begin     = 0;                  // reset position
+
+        memset(buf,0,BUFLEN+1);	            // clear buffer 
+
+        rc = read(socket, buf, BUFLEN);     // read to length of buffer
+
+        if (rc < 1) { // nothing meaningful to read, closing socket.
+
+            if (DEBUG) { cur_time(); printf("x\tclosing socket:%d, can't read\n",socket);fflush(stdout); }
+            closeSK(socket, open_sockets, hashtable);
+         
+            // at this point fall out of the loop and return my_events
+
+        } 
+ 
+        if (rc > 0 || partial) {  // there's a message of at least 1 char, or a partial
+
+            // Go through buffer and get all messages, assuming null termination
+
+            // NOTE - it seems plausible (but I think unlikely?) that a particular
+            // socket could put out so much traffic that it could "lock" the server
+            // with incoming traffic.  Probably we should spawn a separate thread
+            // for each readable socket?   Not sure we're ever going to see that 
+            // level of volume....
+
+            while (cur_pos<BUFLEN) {     // go through buffer
+
+                int str_found = 0;
+
+                // look for a line (ends in CR LF or 13 10)
+                while (buf[cur_pos] != 0  && buf[cur_pos] != 10 &&  cur_pos<BUFLEN) {   // look for non-null chars
+                    str_found = 1;
+                    cur_pos++;
+                }
+
+                if (str_found || partial) {    // message found
+
+                    int y;
+
+                    if (cur_pos==BUFLEN && buf[cur_pos-1] > 13) {
+
+                        // non-null and non-return final character of string, eg we're at end of buffer (and no CR LF, so it *may* be a partial message).
+
+                        partial      = cur_pos-cur_begin;                        // save length of partial string
+
+                        for (y=0; y<=partial; y++)
+                            last_string[y] = buf[cur_begin+y];
+
+                    } else {
+
+                        // we found a string of character(s), ending either in 0, 10, or 13 (null / end of buffer, CR or LF)
+                        // or there's a leftover partial
+
+                        if (cur_pos) {
+                            if (buf[cur_pos] <= 13) 
+                                buf[cur_pos] = '\0';    // get rid of CR/LF
+                            if (buf[cur_pos-1]<=13)     // string may end with CR LF (two characters, both non null) 
+                                buf[cur_pos-1] = '\0';  // [cur_pos can't be 0 here if str_found is 1]
+                        }
+
+
+                        if (partial) {             // there's part of string left over from last buffer
+
+                            // HM - I guess in theory last_string could contain a full BUFFLEN, and this could be an nth buffer of data.
+                            // In fact - we're not incrementing partial with each buffer, so last_string can only be 2 buffers (and thus message is limited to 2K)
+
+                            // copy string found (if any) to end of last_string and then process message
+                            for (y=0; y<cur_pos; y++)
+                                last_string[partial+y] = buf[y];
+
+                            partial   = 0;
+
+			} else {
+                            for (y=0; y<cur_pos-cur_begin; y++)
+                                last_string[y] = buf[cur_begin+y];
+
+                        }
+
+                        if (last_string[0] != 0) {
+
+                            // Process message here....
+                            my_msg = makeMsg(socket, last_string, open_sockets, readable_sockets, writeable_sockets, hashtable);
+
+                            // do something with a meaningful message.
+                            // could return a timed sequence, which we set along with the start time
+                            event_t *new_events;
+                            new_events = processMsg(socket, my_msg, open_sockets, hashtable);
+                            my_events  = concat_events(my_events,new_events);
+                            
+                            free_msg(my_msg);
+                        }
+
+                        memset(last_string,0,2*BUFLEN+1);	  
+
+                        cur_pos++;                // advance to next position 
+                        cur_begin = cur_pos;      // start of next line
+
+                    }
+
+                } else {                          // else buffer is empty, jumpt to end
+                    cur_pos = BUFLEN;
+                    rc      = 0;
+                }
+
+            } // end while < BUFLEN
+
+        } // end if rc or partial
+
+    } // end while there's a buffer or a partial
+
+    return my_events;
+
+} // end readBuffer
+
+
+
 
 
 
 
 /* given an incoming message, do the right thing with that message */
-event_t *processMsg(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
+event_t *processMsg(int socket, msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable) {
 
     event_t *timed_sequence;
     timed_sequence = NULL;
+
+
+    // skip mal-formed messages (no message at all/no identifier, no socket?)
+    if (!my_msg || !my_msg->whosTalking)
+        return NULL;
+
+    // show message if debugging
+    if (DEBUG) {
+        cur_time();
+        printf("->  EFFECT:%s socket#:%02d msg1:'%s' msg2:'%s' msg3:'%s' msg4:'%s' \n",
+	my_msg->effectName,socket,my_msg->firstMsg,my_msg->secondMsg,my_msg->thirdMsg,my_msg->fourthMsg);
+        fflush(stdout); 
+    }
+
+    // no need to process empty messages or keep alive signals
+    if (my_msg->firstMsg == NULL || (my_msg->firstMsg && strcmp(my_msg->firstMsg,KeepAlive)==0))  
+        return NULL; 
+
 
     if (strcmp(my_msg->firstMsg,CONTROL)==0) {
 
@@ -809,8 +967,10 @@ event_t *processMsg(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable
             
     } // end there's a message
 
+
     return timed_sequence;
-}
+
+} // end processMsg
 
 
 
@@ -838,9 +998,10 @@ char *getip(int sn) {
 */
 int namedSock (msg_t *my_msg, fd_set *open_sockets, fd_set *readable_sockets, fd_set *writeable_sockets, hash_table_t *hashtable) {
 
-    if (!my_msg->effectName || !my_msg->whosTalking) return 0;
+    if (!my_msg || !my_msg->effectName || !my_msg->whosTalking) return 0;
 
     list_t *anEffect = lookup_effect(hashtable, my_msg->effectName);
+
     int aSock = 0;
   
     if (anEffect != NULL)
@@ -861,6 +1022,7 @@ int namedSock (msg_t *my_msg, fd_set *open_sockets, fd_set *readable_sockets, fd
                    my_msg->effectName, aSock, my_msg->whosTalking);fflush(stdout); }
             } else {
                 // different ips - it's a duplicate effect.
+// NOTE - I think we can't have two same name, as hash table lookup craps out.  Could probably append IP to name for unique name.....
                 if (DEBUG) {cur_time();  printf("xx  DUPLICATE EFFECT!! name:%s is already on socket:%d. IGNORING THIS EFFECT!\n", 
                    my_msg->effectName, aSock);fflush(stdout); }
                 return 0;
@@ -870,20 +1032,21 @@ int namedSock (msg_t *my_msg, fd_set *open_sockets, fd_set *readable_sockets, fd
    
         // no socket found for this effect
 
-        // effect found, update its socket
+        // existing effect found, update its socket
         if (anEffect != NULL) {
             set_effect_socket(hashtable,anEffect->effect,my_msg->whosTalking);  // update effect with new socket number
             if (DEBUG) {cur_time();  printf("updating known effect with now known socket#:%d\n",anEffect->socket_num); fflush(stdout); }
 
         // brand new effect, store it
         } else {
-            add_effect(hashtable, my_msg);    // new effect, add to hash table
-            if (DEBUG) {cur_time();  printf("adding new effect with new socket.\n"); fflush(stdout); }
+            if (my_msg) 
+                add_effect(hashtable, my_msg);    // new effect, add to hash table
         }
     }
 
     return 1;
-}
+
+} // end namedSock
 
 
 
@@ -931,11 +1094,12 @@ event_t *doControl(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable)
     timed_sequence = NULL;
 
     if (strcmp(my_msg->secondMsg,XX)==0) {         // kill all!
+// need to set / free kill state?
 // send kill all message
 // free event list if any (here?  or in main loop better?
     } else if (strcmp(my_msg->secondMsg,RO)==0) {  // setting round order
         set_list_order(hashtable, my_msg);
-    } else if (strcmp(my_msg->secondMsg,CC)==0) {  // creatiang a collection
+    } else if (strcmp(my_msg->secondMsg,CC)==0) {  // creating a collection
         set_collection(hashtable, my_msg);
     } else if (strcmp(my_msg->secondMsg,DS)==0) {  // don't-send flag
         set_effect_ds(hashtable, my_msg->effectName, my_msg->thirdMsg);
@@ -955,6 +1119,9 @@ event_t *doControl(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable)
 
 
 /* EVENT ROUTINES  */
+
+// I NOTE there are event routines in the client which are similar, but not the same.
+// Seems like it could be one library.
 
 /*     create a new single-event list  */
 event_t *new_event(char *str, long begin, int length, list_t *collection) {
@@ -993,10 +1160,10 @@ event_t *check_events(event_t *events, long seq_start, fd_set *open_sockets, has
     last_event = NULL;
     drop_event = NULL;
 
-
-    while (this_event!= NULL) {
+    while (this_event!= NULL && this_event->action) {
 
         if ( now > (seq_start + this_event->begin) && !this_event->started ) {
+
             // begin action
             this_node = this_event->collection;
             while (this_node != NULL) {
@@ -1006,7 +1173,9 @@ event_t *check_events(event_t *events, long seq_start, fd_set *open_sockets, has
                 this_node = this_node->next;
             }
             this_event->started = 1;
+
         } else if ( now > (seq_start + this_event->begin + this_event->length) ) {
+
             // complete action
             this_node = this_event->collection;
             while (this_node != NULL) {
@@ -1029,8 +1198,8 @@ event_t *check_events(event_t *events, long seq_start, fd_set *open_sockets, has
         // drop completed events from the list
         if (drop_event != NULL) {
             this_event = this_event->next;
-            free_event(drop_event);
             drop_event = NULL;
+            free_event(drop_event);
         } else {
             last_event = this_event;
             this_event = this_event->next;
@@ -1055,6 +1224,7 @@ event_t *concat_events(event_t *first_event, event_t *second_event) {
 
     if (!first_event)  return second_event;
     if (!second_event) return first_event;
+    if (first_event == second_event) return first_event;
 
     for (current=first_event; current->next !=NULL; current=current->next);
 
@@ -1065,6 +1235,9 @@ event_t *concat_events(event_t *first_event, event_t *second_event) {
 
 
 
+/*
+
+not actually working....
 
 event_t *parse_events(char *str){
 
@@ -1122,7 +1295,7 @@ event_t *parse_events(char *str){
 
     return events;
 }
-
+*/
 
 
 
@@ -1549,6 +1722,7 @@ list_t *concat_lists(list_t *first_list, list_t *second_list) {
 
     if (!first_list)  return second_list;
     if (!second_list) return first_list;
+    if (first_list == second_list) return first_list;
 
     for (current=first_list; current->next !=NULL; current=current->next);
 
@@ -1735,14 +1909,19 @@ unsigned long hash (hash_table_t *hashtable, char *str) {
 list_t *lookup_effect(hash_table_t *hashtable, char *str) { 
 
     list_t *list; 
+
     unsigned long hashval = hash(hashtable, str);  
 
     /* Go to the correct list based on the hash value and see if str is 
     * in the list. If it is, return return a pointer to the list element. 
     * If it isn't, the item isn't in the table, so return NULL. */ 
-    for (list = hashtable->table[hashval]; list != NULL; list = list->next)  
+
+    list = hashtable->table[hashval]; 
+    while (list && list->effect) {
         if (strcmp(str, list->effect) == 0) 
             return list; 
+        list = list->next;
+    }
      
     return NULL; 
 }
@@ -1790,6 +1969,11 @@ int add_effect(hash_table_t *hashtable, msg_t *my_msg) {
 
     new_element = new_node(my_msg->effectName, my_msg->whosTalking);
     if (!new_element) return 1;  		// insert failed 
+    
+    if (DEBUG) {
+        printf("\n       >>>>>>>>>> ADDING EFFECT '%s' on socket:%d\n\n",my_msg->effectName,my_msg->whosTalking); 
+        fflush(stdout);
+    }
 
     new_element2 = copy_node(new_element);
 
@@ -1820,7 +2004,7 @@ int add_effect(hash_table_t *hashtable, msg_t *my_msg) {
 
 
 /*     create a new single-element list (i.e. a node)   */
-list_t *new_node(char*str, int sock) {
+list_t *new_node(char* str, int sock) {
     list_t *new_list; 
 
     // allocate memory for new node
@@ -1882,6 +2066,7 @@ void update_node(list_t *a_node, list_t *new_list) {
 
 /*    (re)-set the socket number for a given effect (hash fast)  */
 int set_effect_socket(hash_table_t *hashtable, char *str, int sock) { 
+
     list_t *current_list; 
 
     current_list = lookup_effect(hashtable, str); 
@@ -2067,7 +2252,6 @@ void free_node_list(list_t *head) {
         pos  = pos->next; 
         free_node(temp);
     } 
-    head = NULL;
 }
 
 
@@ -2092,7 +2276,6 @@ void free_event_list(event_t *head) {
         pos  = pos->next; 
         free_event(temp);
     } 
-    head = NULL;
 }
 
 

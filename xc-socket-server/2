@@ -252,7 +252,6 @@ long    start_time     = 0;             // sys clock when we begin
 long    start_ms       = 0;             // sys clock when we begin
 long    current_time   = 0;             // millisenconds since start_time
 
-long    last_now       = 0L;
 
 
 
@@ -295,7 +294,6 @@ void            error();
 void            cur_time();
 long            millis();
 int             naive_str2int ();
-char            *int2str ();
 void            delay();
 void            delay_micro();
 
@@ -1058,10 +1056,21 @@ void send_msg (list_t *my_element, fd_set *open_sockets, char *msg, hash_table_t
     if (FD_ISSET(sock, open_sockets)) { 
         int nBytes = strlen(msg) + 1;
         if (!my_element->do_not_send) {
-//long now = millis();
-//long diff = now - last_now;
-//printf("now:%ld   diff:%ld\n",now,diff);
-//last_now = now;
+
+
+int   len = strlen(msg) + 15;
+char  mmm[len];
+int   x = 0;
+while (x<strlen(msg)) {
+  mmm[x] = msg[x];
+  x++;
+}
+char *tmp = int2str(millis());
+while (x<len) {
+   mmm[x] = mmm[x];
+x++; 
+}
+
             int bsent = send(sock, msg, nBytes, MSG_NOSIGNAL);
             if (DEBUG) { cur_time(); printf("<-  sent message:'%s' to %10s on socket:%02d  bytes sent:%d\n",msg,effect,sock,bsent); fflush(stdout); }
         } else {
@@ -1119,7 +1128,7 @@ event_t *doControl(msg_t *my_msg, fd_set *open_sockets, hash_table_t *hashtable)
 // Seems like it could be one library.  True of lists, msgs, events
 
 /*     create a new single-event list  */
-event_t *new_event(char *str, long begin, long length, list_t *collection, long seq_start) {
+event_t *new_event(char *str, long begin, int length, list_t *collection) {
     event_t *new_event; 
 
     // allocate memory 
@@ -1127,7 +1136,7 @@ event_t *new_event(char *str, long begin, long length, list_t *collection, long 
 
     // Populate data
     new_event->action       = strdup(str);          // explicity copy original into memory 
-    new_event->begin        = begin + seq_start;
+    new_event->begin        = begin;
     new_event->length       = length;
     new_event->started      = 0;
 
@@ -1149,15 +1158,13 @@ event_t *check_events(event_t *events, long seq_start, fd_set *open_sockets, has
     long     now = millis();
 
     list_t  *this_node;
-    event_t *this_event, *last_event, *drop_event, *head;
+    event_t *this_event, *last_event, *drop_event;
 
-    head       = events;
     this_event = events;
     last_event = NULL;
+    drop_event = NULL;
 
     while (this_event!= NULL && this_event->action) {
-    
-        drop_event = NULL;
 
         if ( now > (seq_start + this_event->begin) && !this_event->started ) {
 
@@ -1194,21 +1201,9 @@ event_t *check_events(event_t *events, long seq_start, fd_set *open_sockets, has
 
         // drop completed events from the list
         if (drop_event != NULL) {
-            if (last_event != NULL && this_event != NULL)
-                last_event->next = this_event->next;
-
             this_event = this_event->next;
-
-            if (drop_event == head) {
-                if (head->next) {
-                    head = head->next;
-                } else {
-                    head = NULL;
-                }
-            }
-
+            drop_event = NULL;
             free_event(drop_event);
-
         } else {
             last_event = this_event;
             this_event = this_event->next;
@@ -1217,7 +1212,7 @@ event_t *check_events(event_t *events, long seq_start, fd_set *open_sockets, has
     }
     
     // returns an ever smaller list, eventually null
-    return head;
+    return events;
 }
 
 
@@ -1400,7 +1395,7 @@ event_t *bigRound(int whosTalking, fd_set *open_sockets, hash_table_t *hashtable
 
     eff = lookup_effect(hashtable, BIGBETTY);
     if (eff != NULL) {
-        round = new_event("poof", cur_start, 5000L, copy_node(eff), millis() );
+        round = new_event("poof", cur_start, 5000L, copy_node(eff) );
         big_round = concat_events(big_round,round); 
     }
 
@@ -1421,7 +1416,6 @@ event_t *roundRobbin(int whosTalking, list_t *all_elements, int the_poof, int th
 
     int      my_sock   = 0;
     long     my_start  = *begin;
-    long     now       = millis();
 
     my_events          = NULL;
 
@@ -1430,7 +1424,7 @@ event_t *roundRobbin(int whosTalking, list_t *all_elements, int the_poof, int th
 
         my_sock = all_elements->socket_num;
         if (my_sock != whosTalking) {
-            event_t *event = new_event("poof", my_start, (long)the_poof, copy_node(all_elements), now );
+            event_t *event = new_event("poof", my_start, (long)the_poof, copy_node(all_elements) );
             if (my_events ==  NULL) {
                 my_events = event;
                 cur_event = my_events;
@@ -1455,7 +1449,6 @@ event_t *lulu_poof(list_t *my_element, long *begin) {
 
     if (my_element == NULL) return NULL;
 
-    long     now       = millis();
     event_t   *my_events, *cur_event;
     my_events  = NULL;
     long     my_start  = *begin;
@@ -1468,7 +1461,7 @@ event_t *lulu_poof(list_t *my_element, long *begin) {
     int xx;
     for (xx=0; xx<4; xx++) {
 
-        event_t *event = new_event("poof", my_start, 80L, copy_node(my_element), now );
+        event_t *event = new_event("poof", my_start, 80L, copy_node(my_element) );
         if (my_events ==  NULL) {
             my_events = event;
             cur_event = my_events;
@@ -1480,7 +1473,7 @@ event_t *lulu_poof(list_t *my_element, long *begin) {
 
     }
 
-    event_t *event = new_event("poof", my_start+500L, 1600L, copy_node(my_element), now );
+    event_t *event = new_event("poof", my_start+500L, 1600L, copy_node(my_element) );
     cur_event->next = event;
     cur_event = event;
     my_start += 500L + 1600L;
@@ -1597,43 +1590,6 @@ int naive_str2int (const char* snum) {
     return accum;
 }
 
-
-long powd(int x, int y) {
-    long result = 1;
-    int a;
-    for (a=0; a<y; a++) {
-        result = result * x;
-    }
-   return result;
-}
-
-char *int2str (long num) {
-
-    int size = 16; 
-    if (num > powd(10,size)) return NULL;
-
-    char *out;
-
-    if ((out = malloc(size+1)) == NULL) { return NULL; }  
-    memset(out,'\0',size+1);
-
-    int numstarted = 0;
-    int  x = 1;
-    while (num && x <= size) {
-        int digit = (int)num/(powd(10,(size-x-1)));
-        if (digit && !numstarted) 
-            numstarted = x;
-        
-        if (numstarted) {
-            out[x-numstarted] = (char)(digit+0x30); 
-        }
-        num = num - digit * powd(10,(size-x-1));
-        x++;
-    }
-   
-    return out;
-
-} // end int2str
 
 
 
